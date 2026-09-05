@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        var mode = localStorage.getItem('adminlte-theme-mode');
+        if (mode !== 'dark' && mode !== 'light') mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        var isDark = mode === 'dark';
+        document.documentElement.setAttribute('data-theme-mode', mode);
+        document.documentElement.classList.add('theme-preload');
+        document.documentElement.classList.toggle('theme-preload-dark', isDark);
+        document.documentElement.classList.toggle('theme-preload-light', !isDark);
+        document.documentElement.classList.toggle('dark-mode', isDark);
+      })();
+    </script>
+    <title>De'Jati POS</title>
+  </head>
+  <body>
+    <main id="app" aria-live="polite"></main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
