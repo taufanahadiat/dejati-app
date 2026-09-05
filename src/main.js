@@ -69,7 +69,10 @@ function isNativeApp() {
   return Capacitor.isNativePlatform();
 }
 function printerName(type) {
-  return state.printers[type]?.name || "not connected";
+  const printer = state.printers[type];
+  if (!printer?.address) return "not connected";
+  const suffix = String(printer.address).slice(-5);
+  return `${printer.name || "Printer"} ${suffix}`;
 }
 function receiptLine(left, right = "") {
   const width = 32;
@@ -88,6 +91,11 @@ function toBase64(text) {
   });
   return btoa(binary);
 }
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 function receiptText(order) {
   const date = orderDate(order).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" });
   const items = order.items.flatMap((item) => [
@@ -104,6 +112,18 @@ function receiptText(order) {
     receiptLine("TOTAL", money(order.total)),
     ...(order.method === "cash" ? [receiptLine("Bayar", money(order.paid)), receiptLine("Kembali", money(order.change))] : []),
     "\x1B\x61\x01", "Terima kasih", "\n\n\n\n",
+  ].join("\n");
+}
+function kitchenReceiptText(order) {
+  const date = orderDate(order).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" });
+  const items = order.items.flatMap((item) => [
+    `${item.qty}x ${String(item.name).slice(0, 28)}`,
+    ...(item.notes ? [`  ${String(item.notes).slice(0, 29)}`] : []),
+  ]);
+  return [
+    "\x1B\x40\x1B\x61\x01", "KITCHEN ORDER", "DE'JATI COFFEE GARDEN", "\x1B\x61\x00",
+    "--------------------------------", receiptLine("Meja", order.table), receiptLine("Waktu", date),
+    "--------------------------------", ...items, "--------------------------------", "\n\n\n\n",
   ].join("\n");
 }
 async function ensureBluetoothReady() {
@@ -150,7 +170,7 @@ async function connectPrinter(address) {
     notice(error.message || "Koneksi ke printer gagal.", "danger");
   }
 }
-async function printReceipt(order, type = "cashier") {
+async function printReceipt(order, type = "cashier", format = type === "kitchen" ? "kitchen" : "invoice") {
   if (!isNativeApp()) {
     window.print();
     return;
@@ -163,11 +183,25 @@ async function printReceipt(order, type = "cashier") {
   try {
     await ensureBluetoothReady();
     await BluetoothSerial.connect({ address: printer.address });
-    await BluetoothSerial.write({ data: toBase64(receiptText(order)) });
+    await BluetoothSerial.write({ data: toBase64(format === "kitchen" ? kitchenReceiptText(order) : receiptText(order)) });
+    await wait(900);
+    await BluetoothSerial.disconnect();
     notice(`Struk dikirim ke ${printer.name || printer.address}.`, "success");
   } catch (error) {
+    await BluetoothSerial.disconnect?.().catch(() => undefined);
     notice(error.message || "Struk gagal dikirim ke printer.", "danger");
   }
+}
+async function printCompletedOrder(order) {
+  if (!isNativeApp()) {
+    window.print();
+    return;
+  }
+  await printReceipt(order, "cashier");
+  await wait(2500);
+  await printReceipt(order, "kitchen");
+  await wait(2500);
+  await printReceipt(order, "cashier", "kitchen");
 }
 function esc(value = "") {
   const node = document.createElement("span");
@@ -447,7 +481,7 @@ function modalView() {
   if (!state.modal) return "";
   if (state.modal === "printer") {
     const label = state.printerTarget === "cashier" ? "Kasir" : "Dapur";
-    const devices = state.printerDevices.map((device) => `<button class="list-group-item list-group-item-action" data-printer-address="${esc(device.address)}"><strong>${esc(device.name || "Perangkat tanpa nama")}</strong><small class="d-block text-muted">${esc(device.address)}</small></button>`).join("");
+    const devices = state.printerDevices.map((device) => `<button class="list-group-item list-group-item-action" data-printer-address="${esc(device.address)}"><strong>${esc(device.name || "Perangkat tanpa nama")} ${esc(String(device.address).slice(-5))}</strong><small class="d-block text-muted">${esc(device.address)}</small></button>`).join("");
     return `<div class="modal-backdrop-mobile"><div class="modal-dialog"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title">Pilih Printer ${label}</h5><button class="close text-white" type="button" data-close>&times;</button></div><div class="modal-body">${state.printerLoading ? `<p class="text-muted mb-0"><i class="fas fa-spinner fa-spin mr-1"></i>Membaca perangkat Bluetooth...</p>` : devices || `<p class="text-muted mb-0">Tidak ada perangkat yang sudah dipasangkan. Pasangkan printer dari Pengaturan Bluetooth Android, lalu coba lagi.</p>`}</div><div class="modal-footer"><button class="btn btn-secondary" type="button" data-close>Batal</button></div></div></div></div>`;
   }
   if (state.modal === "pay") return paymentModal();
@@ -639,7 +673,7 @@ function saveOrder(data, openBill = false) {
       : "Transaksi tersimpan di perangkat.",
     "success",
   );
-  if (!openBill) setTimeout(() => void printReceipt(order), 0);
+  if (!openBill) setTimeout(() => void printCompletedOrder(order), 0);
 }
 async function sync(silent = false) {
   if (!state.session?.token || state.syncing) return;

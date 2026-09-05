@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Android: install + scrcpy (all)",
+      "type": "node-terminal",
+      "request": "launch",
+      "env": {
+        "NODE_OPTIONS": "",
+        "VSCODE_INSPECTOR_OPTIONS": ""
+      },
+      "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\vscode-android-run.ps1\" -Target all"
+    },
+    {
+      "name": "Android: install + scrcpy (emulator)",
+      "type": "node-terminal",
+      "request": "launch",
+      "env": {
+        "NODE_OPTIONS": "",
+        "VSCODE_INSPECTOR_OPTIONS": ""
+      },
+      "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\vscode-android-run.ps1\" -Target emulator"
+    },
+    {
+      "name": "Android: install + scrcpy (device)",
+      "type": "node-terminal",
+      "request": "launch",
+      "env": {
+        "NODE_OPTIONS": "",
+        "VSCODE_INSPECTOR_OPTIONS": ""
+      },
+      "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\vscode-android-run.ps1\" -Target device"
+    }
+  ]
+}

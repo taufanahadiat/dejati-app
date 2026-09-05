@@ -167,12 +167,21 @@ public class BluetoothSerialPlugin extends Plugin {
                     output.write(bytes);
                     output.flush();
                 }
+                Thread.sleep(500);
                 call.resolve();
             } catch (Exception error) {
                 Log.e(TAG, "Bluetooth write failed", error);
                 call.reject("Tidak dapat mengirim data cetak: " + error.getMessage());
             }
         }).start();
+    }
+
+    @PluginMethod
+    public void disconnect(PluginCall call) {
+        synchronized (connectionLock) {
+            closeConnection();
+        }
+        call.resolve();
     }
 
     @Override

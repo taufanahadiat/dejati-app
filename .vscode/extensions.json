@@ -1,5 +1,6 @@
 {
   "recommendations": [
-    "ms-vscode.js-debug"
+    "ms-vscode.js-debug",
+    "Webnative.webnative"
   ]
 }

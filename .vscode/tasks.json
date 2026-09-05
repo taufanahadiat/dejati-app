@@ -1,0 +1,69 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Android: install + scrcpy (all)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\vscode-android-run.ps1",
+        "-Target",
+        "all"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: install + scrcpy (emulator)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\vscode-android-run.ps1",
+        "-Target",
+        "emulator"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: install + scrcpy (device)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\vscode-android-run.ps1",
+        "-Target",
+        "device"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Android: install only (all)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\scripts\\vscode-android-run.ps1",
+        "-Target",
+        "all",
+        "-NoScrcpy"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}
