@@ -2,6 +2,19 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Android: Run and Debug Emulator + scrcpy",
+      "type": "pwa-chrome",
+      "request": "attach",
+      "address": "localhost",
+      "port": 9222,
+      "webRoot": "${workspaceFolder}/dist",
+      "sourceMaps": true,
+      "sourceMapPathOverrides": {
+        "../src/*": "${workspaceFolder}/src/*"
+      },
+      "preLaunchTask": "Android: prepare emulator debug + scrcpy"
+    },
+    {
       "name": "Android: install + scrcpy (all)",
       "type": "node-terminal",
       "request": "launch",

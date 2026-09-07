@@ -61,18 +61,6 @@ if ($path === 'orders' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $stmt = mysqli_prepare($conn, 'INSERT INTO mobile_sync_orders (client_order_id,order_id,user_id,created_at) VALUES (?,?,?,NOW())'); mysqli_stmt_bind_param($stmt, 'sii', $clientId,$orderId,$account['id_user']); mysqli_stmt_execute($stmt); mysqli_commit($conn); reply(['order_id'=>$orderId,'total'=>$total]);
   } catch (Throwable $e) { mysqli_rollback($conn); reply(['message' => 'Gagal menyimpan transaksi'], 500); }
 }
-if ($path === 'dashboard' && $_SERVER['REQUEST_METHOD'] === 'GET') {
-  $today = date('Y-m-d');
-  $summary = mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) transactions, COALESCE(SUM(total_amount),0) revenue, COALESCE(AVG(total_amount),0) average_order FROM orders WHERE DATE(created_at)=CURDATE()"));
-  $expense = mysqli_fetch_assoc(mysqli_query($conn, "SELECT COALESCE(SUM(total),0) total FROM pengeluaran WHERE DATE(created_at)=CURDATE()"));
-  $payments = []; $r = mysqli_query($conn, "SELECT payment_method, COUNT(*) transactions, COALESCE(SUM(total_amount),0) total FROM orders WHERE DATE(created_at)=CURDATE() GROUP BY payment_method"); while ($row = mysqli_fetch_assoc($r)) $payments[] = $row;
-  $recent = []; $r = mysqli_query($conn, "SELECT table_number,payment_method,total_amount,paid_amount,created_at FROM orders ORDER BY created_at DESC LIMIT 8"); while ($row = mysqli_fetch_assoc($r)) $recent[] = $row;
-  $top = []; $r = mysqli_query($conn, "SELECT item_name, SUM(quantity) qty, SUM(total) total, 'Cafe' source FROM order_items GROUP BY item_name UNION ALL SELECT item_name, SUM(qty), SUM(total), 'Carwash' FROM order_carwash GROUP BY item_name ORDER BY total DESC LIMIT 8"); while ($row = mysqli_fetch_assoc($r)) $top[] = $row;
-  reply(['date'=>$today,'revenue'=>(int)$summary['revenue'],'transactions'=>(int)$summary['transactions'],'average_order'=>(int)$summary['average_order'],'expense'=>(int)$expense['total'],'net'=>(int)$summary['revenue']-(int)$expense['total'],'payments'=>$payments,'recent_orders'=>$recent,'top_products'=>$top]);
-}
-if ($path === 'daily-reports' && $_SERVER['REQUEST_METHOD'] === 'GET') {
-  $records=[]; $r=mysqli_query($conn, 'SELECT * FROM tb_closingan ORDER BY tanggal DESC LIMIT 60'); while($row=mysqli_fetch_assoc($r)){ $row['expenses']=json_decode($row['detail_pengeluaran'] ?? '[]', true) ?: []; $records[]=$row; } reply(['records'=>$records]);
-}
 if ($path === 'daily-report' && $_SERVER['REQUEST_METHOD'] === 'GET') {
   $r = mysqli_query($conn, "SELECT COALESCE(SUM(total_amount),0) total_sales, COALESCE(SUM(CASE WHEN payment_method='cash' THEN total_amount END),0) cash, COALESCE(SUM(CASE WHEN payment_method='qris' THEN total_amount END),0) qris, COALESCE(SUM(CASE WHEN payment_method='credit_card' THEN total_amount END),0) card FROM orders WHERE DATE(created_at)=CURDATE()"); $row = mysqli_fetch_assoc($r); reply(['date'=>date('Y-m-d'),'total_sales'=>(int)$row['total_sales'],'cash'=>(int)$row['cash'],'qris'=>(int)$row['qris'],'card'=>(int)$row['card']]);
 }

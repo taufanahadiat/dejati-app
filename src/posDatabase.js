@@ -57,6 +57,19 @@ export async function loadServerCatalog() {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
+export async function mirrorReportHistory(history) {
+  const db = await database();
+  if (!db) return;
+  await db.run("INSERT OR REPLACE INTO server_catalog_cache (cache_key, payload, synced_at) VALUES (?, ?, ?);", ["report-history", JSON.stringify(history), new Date().toISOString()]);
+}
+
+export async function loadReportHistory() {
+  const db = await database();
+  if (!db) return null;
+  const result = await db.query("SELECT payload FROM server_catalog_cache WHERE cache_key = ?;", ["report-history"]);
+  try { return JSON.parse(result.values?.[0]?.payload || "null"); } catch { return null; }
+}
+
 export async function mirrorServerTransaction(order, serverOrderId) {
   const db = await database();
   if (!db) return;

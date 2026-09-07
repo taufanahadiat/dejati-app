@@ -13,6 +13,7 @@ $Activity = "com.dejati.pos/.MainActivity"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $AndroidDir = Join-Path $Root "android"
 $ApkPath = Join-Path $AndroidDir "app\build\outputs\apk\debug\app-debug.apk"
+. (Join-Path $PSScriptRoot 'android-scrcpy.ps1')
 
 function Get-CommandPath {
     param([string]$Name)
@@ -31,7 +32,7 @@ function Get-AdbPath {
         return $adb
     }
 
-    $sdkRoots = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT) | Where-Object { $_ }
+    $sdkRoots = @($env:ANDROID_HOME, $env:ANDROID_SDK_ROOT, (Join-Path $env:LOCALAPPDATA 'Android\Sdk')) | Where-Object { $_ }
     foreach ($sdkRoot in $sdkRoots) {
         $candidate = Join-Path $sdkRoot "platform-tools\adb.exe"
         if (Test-Path $candidate) {
@@ -91,7 +92,12 @@ function Get-ConnectedDevices {
 Set-Location $Root
 
 $adb = Get-AdbPath
-$scrcpy = Get-CommandPath "scrcpy"
+if (-not $NoScrcpy) { $null = Get-ScrcpyExecutable }
+
+Invoke-Native $adb @('start-server')
+if ($Target -eq 'emulator' -or $Target -eq 'all') {
+    & (Join-Path $Root '.vscode\android-debug.ps1') -Action StartEmulator -NoScrcpy:$NoScrcpy
+}
 
 if (-not $SkipBuild) {
     if (-not (Test-Path (Join-Path $Root "node_modules"))) {
@@ -127,7 +133,7 @@ Invoke-Step "Read connected Android targets" {
     & $adb devices
 }
 
-$devices = Get-ConnectedDevices -Adb $adb
+$devices = @(Get-ConnectedDevices -Adb $adb)
 if (-not $devices -or $devices.Count -eq 0) {
     throw "Tidak ada target '$Target' yang siap. Buka emulator atau sambungkan device USB dengan USB debugging aktif."
 }
@@ -142,13 +148,8 @@ foreach ($serial in $devices) {
     }
 
     if (-not $NoScrcpy) {
-        if (-not $scrcpy) {
-            Write-Warning "scrcpy tidak ditemukan di PATH. App sudah ter-install dan dibuka di $serial."
-            continue
-        }
-
         Invoke-Step "Open scrcpy for $serial" {
-            Start-Process -FilePath $scrcpy -ArgumentList @("-s", $serial, "--window-title", "Dejati POS - $serial")
+            Start-Scrcpy -Serial $serial
         }
     }
 }

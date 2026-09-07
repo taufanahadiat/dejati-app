@@ -1,6 +1,11 @@
+import { createReports } from "./reports.js";
+import { orderStatus } from "./reportModel.js";
+import { mergeReportOrders } from "./reportOrders.js";
 import {
   initializeServerMirror,
   loadServerCatalog,
+  loadReportHistory,
+  mirrorReportHistory,
   mirrorServerData,
   mirrorServerTransaction,
 } from "./posDatabase.js";
@@ -17,6 +22,7 @@ const state = {
   categories: read("dejati-categories", []),
   cart: read("dejati-cart", []),
   orders: read("dejati-orders", []),
+  serverHistory: read("dejati-server-history", null),
   page: "dashboard",
   category: "all",
   search: "",
@@ -38,6 +44,28 @@ const state = {
     localStorage.getItem("adminlte-theme-mode") ||
     (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
 };
+const reports = createReports({
+  state, orders: reportingOrders, api, render, persist, notice,
+  money, esc, printReceipt,
+  refresh: async () => {
+    if (state.syncing) throw new Error("Sinkronisasi sedang berjalan. Coba kembali sebentar lagi.");
+    await sync(true);
+    const history = await api("report-history", state.session.token);
+    state.serverHistory = history;
+    persist();
+    await mirrorReportHistory(history);
+  },
+  connectCashier: async () => {
+    await ensureBluetoothReady();
+    const printer = state.printers.cashier;
+    if (!printer?.address) throw new Error("Pilih printer kasir melalui menu Printer terlebih dahulu.");
+    await BluetoothSerial.connect({ address: printer.address });
+  },
+  printText: async (text) => {
+    try { await BluetoothSerial.write({ data: toBase64(text) }); await wait(900); }
+    finally { await BluetoothSerial.disconnect().catch(() => undefined); }
+  },
+});
 if (localStorage.getItem("dejati-catalog-source") !== "sqlite-sync") {
   state.products = [];
   state.categories = [];
@@ -53,6 +81,7 @@ function read(key, fallback) {
   }
 }
 function persist() {
+  if (state.serverHistory) localStorage.setItem("dejati-server-history", JSON.stringify(state.serverHistory));
   localStorage.setItem("dejati-products", JSON.stringify(state.products));
   localStorage.setItem("dejati-categories", JSON.stringify(state.categories));
   localStorage.setItem("dejati-cart", JSON.stringify(state.cart));
@@ -211,8 +240,15 @@ function esc(value = "") {
 function total() {
   return state.cart.reduce((sum, item) => sum + item.price * item.qty, 0);
 }
+function reportingOrders() {
+  return mergeReportOrders(state.serverHistory?.orders, state.orders);
+}
+function reportExpense(date) {
+  const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  return Number(state.serverHistory?.expenses?.[key] || 0);
+}
 function report() {
-  const orders = state.orders;
+  const orders = reportingOrders().filter(order => orderStatus(order) === "PAID");
   return {
     total: orders.reduce((s, o) => s + o.total, 0),
     count: orders.length,
@@ -241,31 +277,31 @@ function startOfWeek(date) {
   return value;
 }
 function orderSummary(orders) {
-  return orders.reduce((summary, order) => {
+  return orders.filter(order => orderStatus(order) === "PAID").reduce((summary, order) => {
     summary.total += Number(order.total || 0);
     summary.count += 1;
     const method = String(order.method || "").toLowerCase();
     if (method === "cash") summary.cash += Number(order.total || 0);
     else if (method === "qris") summary.qris += Number(order.total || 0);
     else if (method === "credit_card") summary.card += Number(order.total || 0);
-    summary.cafe += order.items?.some((item) => item.cartType === "carwash") ? 0 : Number(order.total || 0);
-    summary.carwash += order.items?.filter((item) => item.cartType === "carwash").reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 1), 0) || 0;
+    summary.cafe += order.items?.filter((item) => item.cartType !== "carwash").reduce((sum, item) => sum + Number(item.lineTotal ?? Number(item.price || 0) * Number(item.qty || 1)), 0) || 0;
+    summary.carwash += order.items?.filter((item) => item.cartType === "carwash").reduce((sum, item) => sum + Number(item.lineTotal ?? Number(item.price || 0) * Number(item.qty || 1)), 0) || 0;
     return summary;
   }, { total: 0, count: 0, cash: 0, qris: 0, card: 0, cafe: 0, carwash: 0 });
 }
 function dashboardData() {
   const now = new Date();
-  const today = state.orders.filter((order) => sameDay(orderDate(order), now));
+  const today = reportingOrders().filter((order) => sameDay(orderDate(order), now));
   const yesterdayDate = new Date(now);
   yesterdayDate.setDate(now.getDate() - 1);
-  const yesterday = state.orders.filter((order) => sameDay(orderDate(order), yesterdayDate));
+  const yesterday = reportingOrders().filter((order) => sameDay(orderDate(order), yesterdayDate));
   const weekStart = startOfWeek(now);
-  const week = state.orders.filter((order) => orderDate(order) >= weekStart);
-  const month = state.orders.filter((order) => {
+  const week = reportingOrders().filter((order) => orderDate(order) >= weekStart);
+  const month = reportingOrders().filter((order) => {
     const date = orderDate(order);
     return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
   });
-  const year = state.orders.filter((order) => orderDate(order).getFullYear() === now.getFullYear());
+  const year = reportingOrders().filter((order) => orderDate(order).getFullYear() === now.getFullYear());
   const todaySummary = orderSummary(today);
   const previous = orderSummary(yesterday);
   const change = (value, before) => before ? Math.round(((value - before) / before) * 100) : value ? 100 : 0;
@@ -283,7 +319,7 @@ function dashboardCanvas(canvas, range) {
   context.clearRect(0, 0, width, height);
   const now = new Date();
   const labels = range === "today" ? Array.from({ length: 8 }, (_, index) => `${String(index + 9).padStart(2, "0")}:00`) : range === "year" ? ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"] : range === "week" ? ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"] : Array.from({ length: 6 }, (_, index) => `${index + 1}`);
-  const values = labels.map((_, index) => state.orders.filter((order) => {
+  const values = labels.map((_, index) => reportingOrders().filter((order) => {
     const date = orderDate(order);
     if (range === "today") return sameDay(date, now) && Math.min(7, Math.max(0, date.getHours() - 9)) === index;
     if (range === "year") return date.getFullYear() === now.getFullYear() && date.getMonth() === index;
@@ -392,21 +428,21 @@ function shell(content) {
       ? "Dashboard"
       : state.page === "transaksi"
         ? "Transaksi Kasir"
-        : "Daily Report (Closingan)";
-  return `<div class="wrapper hold-transition sidebar-mini layout-fixed layout-navbar-fixed ${state.sidebarOpen ? "sidebar-open" : "sidebar-collapse"}"><nav class="main-header navbar navbar-expand ${state.theme === "dark" ? "navbar-dark navbar-gray-dark" : "navbar-white navbar-light"}"><button class="nav-link btn-nav" data-action="sidebar"><i class="fas fa-bars"></i></button><span class="h5 mb-0">${title}</span><div class="ml-auto"><button class="btn btn-sm btn-outline-primary mr-2" data-action="sync" ${state.syncing ? "disabled" : ""}><i class="fas fa-sync-alt ${state.syncing ? "fa-spin" : ""}"></i> ${state.syncing ? "Sync..." : "Sync"}</button><button class="btn btn-sm btn-link" data-action="theme" aria-label="Ganti tema"><i class="fas fa-${state.theme === "dark" ? "sun" : "moon"}"></i></button></div></nav><aside class="main-sidebar sidebar-dark-primary elevation-4"><a class="brand-link"><img src="/server-assets/img/logo-only-white.png" class="brand-image"><span class="brand-text font-weight-light"><b>De'</b>Jati</span></a><div class="sidebar"><div class="user-panel mt-3 pb-3 mb-3 d-flex"><img src="/server-assets/img/user-no-image-gray.png" class="img-circle elevation-2" width="34"><div class="info"><span>${esc(user)}</span></div></div><nav><ul class="nav nav-pills nav-sidebar flex-column"><li class="nav-item"><button class="nav-link nav-button ${state.page === "dashboard" ? "active" : ""}" data-page="dashboard"><i class="nav-icon fas fa-tachometer-alt"></i><p>Dashboard</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "transaksi" ? "active" : ""}" data-page="transaksi"><i class="nav-icon fas fa-cash-register"></i><p>Transaksi</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "report" ? "active" : ""}" data-page="report"><i class="nav-icon fas fa-calendar-day"></i><p>Daily Report</p></button></li><li class="nav-item mt-3"><button class="nav-link nav-button" data-action="logout"><i class="nav-icon fas fa-sign-out-alt"></i><p>Logout</p></button></li></ul></nav></div></aside><div class="content-wrapper">${content}</div></div>`;
+        : state.page === "history" ? "History Transaksi" : "Closing Harian";
+  return `<div class="wrapper hold-transition sidebar-mini layout-fixed layout-navbar-fixed ${state.sidebarOpen ? "sidebar-open" : "sidebar-collapse"}"><nav class="main-header navbar navbar-expand ${state.theme === "dark" ? "navbar-dark navbar-gray-dark" : "navbar-white navbar-light"}"><button class="nav-link btn-nav" data-action="sidebar"><i class="fas fa-bars"></i></button><span class="h5 mb-0">${title}</span><div class="ml-auto"><button class="btn btn-sm btn-outline-primary mr-2" data-action="sync" ${state.syncing ? "disabled" : ""}><i class="fas fa-sync-alt ${state.syncing ? "fa-spin" : ""}"></i> ${state.syncing ? "Sync..." : "Sync"}</button><button class="btn btn-sm btn-link" data-action="theme" aria-label="Ganti tema"><i class="fas fa-${state.theme === "dark" ? "sun" : "moon"}"></i></button></div></nav><aside class="main-sidebar sidebar-dark-primary elevation-4"><a class="brand-link"><img src="/server-assets/img/logo-only-white.png" class="brand-image"><span class="brand-text font-weight-light"><b>De'</b>Jati</span></a><div class="sidebar"><div class="user-panel mt-3 pb-3 mb-3 d-flex"><img src="/server-assets/img/user-no-image-gray.png" class="img-circle elevation-2" width="34"><div class="info"><span>${esc(user)}</span></div></div><nav><ul class="nav nav-pills nav-sidebar flex-column"><li class="nav-item"><button class="nav-link nav-button ${state.page === "dashboard" ? "active" : ""}" data-page="dashboard"><i class="nav-icon fas fa-tachometer-alt"></i><p>Dashboard</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "transaksi" ? "active" : ""}" data-page="transaksi"><i class="nav-icon fas fa-cash-register"></i><p>Transaksi</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "report" ? "active" : ""}" data-page="report"><i class="nav-icon fas fa-calendar-day"></i><p>Closing Harian</p></button></li><li class="nav-item mt-3"><button class="nav-link nav-button" data-action="logout"><i class="nav-icon fas fa-sign-out-alt"></i><p>Logout</p></button></li></ul></nav></div></aside><div class="content-wrapper">${content}</div></div>`;
 }
 function dashboardContent(data, average, openBills, stat, periodRow, payment, topProducts) {
-  const recent = state.orders.slice(0, 5).map((order) => `<tr><td>${orderDate(order).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td><span class="badge badge-${order.paid ? "success" : "warning"}">${order.paid ? "Paid" : "Open Bill"}</span></td><td class="text-right">${money(order.total)}</td></tr>`).join("");
-  return `<section class="content pt-3"><div class="container-fluid"><div class="dashboard-hero mb-3"><div class="row align-items-center"><div class="col-lg-8"><h4>Halo, ${esc(state.session.user?.name || "Kasir")}!</h4><p class="mt-1">Ringkasan operasional De'Jati hari ini, ${data.now.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}. Anda login sebagai ${esc(state.session.user?.role || "-")}.</p></div><div class="col-lg-4 mt-3 mt-lg-0 text-lg-right"><button class="btn btn-light btn-sm" data-page="transaksi"><i class="fas fa-cash-register"></i> Buka Transaksi</button><button class="btn btn-outline-light btn-sm" data-page="report"><i class="fas fa-history"></i> Lihat Report</button></div></div></div><div class="row">${stat("Omzet Hari Ini", money(data.todaySummary.total), `${data.revenueChange >= 0 ? "+" : ""}${data.revenueChange}% vs kemarin`, "fa-wallet", "success")}${stat("Total Transaksi Hari Ini", data.todaySummary.count.toLocaleString("id-ID"), `${data.transactionChange >= 0 ? "+" : ""}${data.transactionChange}% vs kemarin`, "fa-receipt", "info")}${stat("Rata-rata Belanja", money(average), `${openBills} open bill belum final`, "fa-chart-line", "warning")}${stat("Nett Hari Ini", money(data.todaySummary.total), "Pengeluaran Rp 0", "fa-balance-scale", "primary")}</div><div class="row"><div class="col-xl-8"><div class="card dash-card"><div class="card-header"><div class="row align-items-center"><div class="col-md-7"><h3 class="card-title mb-0"><i class="fas fa-chart-area mr-1"></i> Trend Histori Transaksi</h3></div><div class="col-md-5 mt-2 mt-md-0"><select id="dashboardTrendRange" class="form-control form-control-sm"><option value="today">Hari Ini per Jam</option><option value="week">Minggu Ini</option><option value="month" ${state.dashboardRange === "month" ? "selected" : ""}>Bulan Ini</option><option value="year">Tahun Ini</option></select></div></div></div><div class="card-body"><div class="dash-chart-wrap"><canvas id="dashboardTrendChart"></canvas></div></div></div></div><div class="col-xl-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-layer-group mr-1"></i> Ringkasan Periode</h3></div><div class="card-body p-0"><table class="table table-striped dash-table mb-0"><thead><tr><th>Periode</th><th class="text-right">Transaksi</th><th class="text-right">Omzet</th></tr></thead><tbody>${periodRow("Hari Ini", data.todaySummary)}${periodRow("Minggu Ini", data.week)}${periodRow("Bulan Ini", data.monthSummary)}${periodRow("Tahun Ini", data.year)}</tbody></table></div></div></div></div><div class="row"><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-credit-card mr-1"></i> Metode Pembayaran Hari Ini</h3></div><div class="card-body">${payment.map(([label, value, color]) => `<div class="mb-2"><div class="d-flex justify-content-between"><span>${label}</span><strong>${money(value)}</strong></div><div class="progress progress-sm"><div class="progress-bar bg-${color}" style="width:${data.todaySummary.total ? Math.round((value / data.todaySummary.total) * 100) : 0}%"></div></div></div>`).join("")}</div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-store mr-1"></i> Cafe vs Carwash Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between mb-2"><span>Cafe</span><strong>${money(data.todaySummary.cafe)}</strong></div><div class="d-flex justify-content-between"><span>Carwash</span><strong>${money(data.todaySummary.carwash)}</strong></div></div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-info-circle mr-1"></i> Info Operasional</h3></div><div class="card-body"><div class="info-box bg-light"><span class="info-box-icon bg-success"><i class="fas fa-mug-hot"></i></span><div class="info-box-content"><span class="info-box-text">Total Produk Terdaftar</span><span class="info-box-number">${state.products.length}</span></div></div><div class="info-box bg-light mb-0"><span class="info-box-icon bg-warning"><i class="fas fa-file-invoice"></i></span><div class="info-box-content"><span class="info-box-text">Open Bill Hari Ini</span><span class="info-box-number">${openBills}</span></div></div></div></div></div></div><div class="row"><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-star mr-1"></i> Produk Terlaris Bulan Ini</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Produk</th><th>Kategori</th><th class="text-right">Qty</th><th class="text-right">Omzet</th></tr></thead><tbody>${topProducts.map((item) => `<tr><td>${esc(item.name)}</td><td><span class="badge badge-light border">${item.category}</span></td><td class="text-right">${item.qty}</td><td class="text-right">${money(item.total)}</td></tr>`).join("") || `<tr><td colspan="4" class="dash-empty">Belum ada penjualan produk bulan ini.</td></tr>`}</tbody></table></div></div></div></div><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-list mr-1"></i> Transaksi Terbaru</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Waktu</th><th>Meja</th><th>Metode</th><th>Status</th><th class="text-right">Total</th></tr></thead><tbody>${recent || `<tr><td colspan="5" class="dash-empty">Belum ada transaksi.</td></tr>`}</tbody></table></div></div></div></div></div></div></section>`;
+  const recent = reportingOrders().slice(0, 5).map((order) => `<tr><td>${orderDate(order).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td><span class="badge badge-${orderStatus(order) === "PAID" ? "success" : orderStatus(order) === "CANCEL" ? "danger" : "warning"}">${orderStatus(order)}</span></td><td class="text-right">${money(order.total)}</td></tr>`).join("");
+  return `<section class="content pt-3"><div class="container-fluid"><div class="dashboard-hero mb-3"><div class="row align-items-center"><div class="col-lg-8"><h4>Halo, ${esc(state.session.user?.name || "Kasir")}!</h4><p class="mt-1">Ringkasan operasional De'Jati hari ini, ${data.now.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}. Anda login sebagai ${esc(state.session.user?.role || "-")}.</p></div><div class="col-lg-4 mt-3 mt-lg-0 text-lg-right"><button class="btn btn-light btn-sm" data-page="transaksi"><i class="fas fa-cash-register"></i> Buka Transaksi</button><button class="btn btn-outline-light btn-sm" data-page="history"><i class="fas fa-history"></i> History Transaksi</button></div></div></div><div class="row">${stat("Omzet Hari Ini", money(data.todaySummary.total), `${data.revenueChange >= 0 ? "+" : ""}${data.revenueChange}% vs kemarin`, "fa-wallet", "success")}${stat("Total Transaksi Hari Ini", data.todaySummary.count.toLocaleString("id-ID"), `${data.transactionChange >= 0 ? "+" : ""}${data.transactionChange}% vs kemarin`, "fa-receipt", "info")}${stat("Rata-rata Belanja", money(average), `${openBills} open bill belum final`, "fa-chart-line", "warning")}${stat("Nett Hari Ini", money(data.todaySummary.total - reportExpense(data.now)), `Pengeluaran ${money(reportExpense(data.now))}`, "fa-balance-scale", "primary")}</div><div class="row"><div class="col-xl-8"><div class="card dash-card"><div class="card-header"><div class="row align-items-center"><div class="col-md-7"><h3 class="card-title mb-0"><i class="fas fa-chart-area mr-1"></i> Trend Histori Transaksi</h3></div><div class="col-md-5 mt-2 mt-md-0"><select id="dashboardTrendRange" class="form-control form-control-sm"><option value="today">Hari Ini per Jam</option><option value="week">Minggu Ini</option><option value="month" ${state.dashboardRange === "month" ? "selected" : ""}>Bulan Ini</option><option value="year">Tahun Ini</option></select></div></div></div><div class="card-body"><div class="dash-chart-wrap"><canvas id="dashboardTrendChart"></canvas></div></div></div></div><div class="col-xl-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-layer-group mr-1"></i> Ringkasan Periode</h3></div><div class="card-body p-0"><table class="table table-striped dash-table mb-0"><thead><tr><th>Periode</th><th class="text-right">Transaksi</th><th class="text-right">Omzet</th></tr></thead><tbody>${periodRow("Hari Ini", data.todaySummary)}${periodRow("Minggu Ini", data.week)}${periodRow("Bulan Ini", data.monthSummary)}${periodRow("Tahun Ini", data.year)}</tbody></table></div></div></div></div><div class="row"><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-credit-card mr-1"></i> Metode Pembayaran Hari Ini</h3></div><div class="card-body">${payment.map(([label, value, color]) => `<div class="mb-2"><div class="d-flex justify-content-between"><span>${label}</span><strong>${money(value)}</strong></div><div class="progress progress-sm"><div class="progress-bar bg-${color}" style="width:${data.todaySummary.total ? Math.round((value / data.todaySummary.total) * 100) : 0}%"></div></div></div>`).join("")}</div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-store mr-1"></i> Cafe vs Carwash Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between mb-2"><span>Cafe</span><strong>${money(data.todaySummary.cafe)}</strong></div><div class="d-flex justify-content-between"><span>Carwash</span><strong>${money(data.todaySummary.carwash)}</strong></div></div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-info-circle mr-1"></i> Info Operasional</h3></div><div class="card-body"><div class="info-box bg-light"><span class="info-box-icon bg-success"><i class="fas fa-mug-hot"></i></span><div class="info-box-content"><span class="info-box-text">Total Produk Terdaftar</span><span class="info-box-number">${state.products.length}</span></div></div><div class="info-box bg-light mb-0"><span class="info-box-icon bg-warning"><i class="fas fa-file-invoice"></i></span><div class="info-box-content"><span class="info-box-text">Open Bill Hari Ini</span><span class="info-box-number">${openBills}</span></div></div></div></div></div></div><div class="row"><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-star mr-1"></i> Produk Terlaris Bulan Ini</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Produk</th><th>Kategori</th><th class="text-right">Qty</th><th class="text-right">Omzet</th></tr></thead><tbody>${topProducts.map((item) => `<tr><td>${esc(item.name)}</td><td><span class="badge badge-light border">${item.category}</span></td><td class="text-right">${item.qty}</td><td class="text-right">${money(item.total)}</td></tr>`).join("") || `<tr><td colspan="4" class="dash-empty">Belum ada penjualan produk bulan ini.</td></tr>`}</tbody></table></div></div></div></div><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-list mr-1"></i> Transaksi Terbaru</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Waktu</th><th>Meja</th><th>Metode</th><th>Status</th><th class="text-right">Total</th></tr></thead><tbody>${recent || `<tr><td colspan="5" class="dash-empty">Belum ada transaksi.</td></tr>`}</tbody></table></div></div></div></div></div></div></section>`;
 }
 function dashboardView() {
   const data = dashboardData();
   const average = data.todaySummary.count ? Math.floor(data.todaySummary.total / data.todaySummary.count) : 0;
-  const openBills = data.today.filter((order) => order.method === "Open Bill").length;
+  const openBills = data.today.filter((order) => orderStatus(order) === "OPEN BILL").length;
   const stat = (label, value, note, icon, color) => `<div class="col-xl-3 col-md-6"><div class="card dash-card dash-stat"><div class="card-body"><div><div class="dash-stat-label">${label}</div><div class="dash-stat-value">${value}</div><div class="dash-stat-note">${note}</div></div><span class="dash-icon bg-${color}"><i class="fas ${icon}"></i></span></div></div></div>`;
   const periodRow = (label, value) => `<tr><td>${label}</td><td class="text-right">${value.count.toLocaleString("id-ID")}</td><td class="text-right">${money(value.total)}</td></tr>`;
   const payment = [["Cash", data.todaySummary.cash, "success"], ["QRIS", data.todaySummary.qris, "info"], ["Kartu", data.todaySummary.card, "warning"]];
-  const topProducts = Object.values(data.month.flatMap((order) => order.items || []).reduce((items, item) => {
+  const topProducts = Object.values(data.month.filter(order => orderStatus(order) === "PAID").flatMap((order) => order.items || []).reduce((items, item) => {
     const key = item.name;
     items[key] ||= { name: item.name, category: item.cartType === "carwash" ? "Carwash" : "Cafe", qty: 0, total: 0 };
     items[key].qty += Number(item.qty || 1); items[key].total += Number(item.price || 0) * Number(item.qty || 1);
@@ -414,7 +450,7 @@ function dashboardView() {
   }, {})).sort((a, b) => b.total - a.total).slice(0, 5);
   return dashboardContent(data, average, openBills, stat, periodRow, payment, topProducts);
   /*
-  return `<section class="content pt-3"><div class="container-fluid"><div class="dashboard-hero mb-3"><div class="row align-items-center"><div class="col-lg-8"><h4>Halo, ${esc(state.session.user?.name || "Kasir")}!</h4><p class="mt-1">Ringkasan operasional De'Jati hari ini, ${data.now.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}. Anda login sebagai ${esc(state.session.user?.role || "-")}.</p></div><div class="col-lg-4 mt-3 mt-lg-0 text-lg-right"><button class="btn btn-light btn-sm" data-page="transaksi"><i class="fas fa-cash-register"></i> Buka Transaksi</button><button class="btn btn-outline-light btn-sm" data-page="report"><i class="fas fa-history"></i> Lihat Report</button></div></div></div><div class="row">${stat("Omzet Hari Ini", money(data.todaySummary.total), `${data.revenueChange >= 0 ? "+" : ""}${data.revenueChange}% vs kemarin`, "fa-wallet", "success")}${stat("Total Transaksi Hari Ini", data.todaySummary.count.toLocaleString("id-ID"), `${data.transactionChange >= 0 ? "+" : ""}${data.transactionChange}% vs kemarin`, "fa-receipt", "info")}${stat("Rata-rata Belanja", money(average), `${openBills} open bill belum final`, "fa-chart-line", "warning")}${stat("Nett Hari Ini", money(data.todaySummary.total), "Pengeluaran Rp 0", "fa-balance-scale", "primary")}</div><div class="row"><div class="col-xl-8"><div class="card dash-card"><div class="card-header"><div class="row align-items-center"><div class="col-md-7"><h3 class="card-title mb-0"><i class="fas fa-chart-area mr-1"></i> Trend Histori Transaksi</h3></div><div class="col-md-5 mt-2 mt-md-0"><select id="dashboardTrendRange" class="form-control form-control-sm"><option value="today">Hari Ini per Jam</option><option value="week">Minggu Ini</option><option value="month" ${state.dashboardRange === "month" ? "selected" : ""}>Bulan Ini</option><option value="year">Tahun Ini</option></select></div></div></div><div class="card-body"><div class="dash-chart-wrap"><canvas id="dashboardTrendChart"></canvas></div></div></div></div><div class="col-xl-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-layer-group mr-1"></i> Ringkasan Periode</h3></div><div class="card-body p-0"><table class="table table-striped dash-table mb-0"><thead><tr><th>Periode</th><th class="text-right">Transaksi</th><th class="text-right">Omzet</th></tr></thead><tbody>${periodRow("Hari Ini", data.todaySummary)}${periodRow("Minggu Ini", data.week)}${periodRow("Bulan Ini", data.monthSummary)}${periodRow("Tahun Ini", data.year)}</tbody></table></div></div><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-clock mr-1"></i> Jam Tersibuk Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between align-items-center"><div><div class="dash-stat-value">${data.today.length ? `${String(orderDate(data.today[0]).getHours()).padStart(2, "0")}:00` : "-"}</div><div class="dash-stat-note">${data.todaySummary.count} transaksi, ${money(data.todaySummary.total)}</div></div><span class="dash-icon bg-secondary"><i class="fas fa-stopwatch"></i></span></div></div></div></div></div><div class="row"><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-credit-card mr-1"></i> Metode Pembayaran Hari Ini</h3></div><div class="card-body">${payment.map(([label, value, color]) => `<div class="mb-2"><div class="d-flex justify-content-between"><span>${label}</span><strong>${money(value)}</strong></div><div class="progress progress-sm"><div class="progress-bar bg-${color}" style="width:${data.todaySummary.total ? Math.round((value / data.todaySummary.total) * 100) : 0}%"></div></div></div>`).join("")}</div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-store mr-1"></i> Cafe vs Carwash Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between mb-2"><span>Cafe</span><strong>${money(data.todaySummary.cafe)}</strong></div><div class="d-flex justify-content-between"><span>Carwash</span><strong>${money(data.todaySummary.carwash)}</strong></div></div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-info-circle mr-1"></i> Info Operasional</h3></div><div class="card-body"><div class="info-box bg-light"><span class="info-box-icon bg-info"><i class="fas fa-users"></i></span><div class="info-box-content"><span class="info-box-text">Pengguna Aktif</span><span class="info-box-number">1 / 1</span></div></div><div class="info-box bg-light"><span class="info-box-icon bg-success"><i class="fas fa-mug-hot"></i></span><div class="info-box-content"><span class="info-box-text">Total Produk Terdaftar</span><span class="info-box-number">${state.products.length}</span></div></div><div class="info-box bg-light mb-0"><span class="info-box-icon bg-warning"><i class="fas fa-file-invoice"></i></span><div class="info-box-content"><span class="info-box-text">Open Bill Hari Ini</span><span class="info-box-number">${openBills}</span></div></div></div></div></div></div><div class="row"><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-star mr-1"></i> Produk Terlaris Bulan Ini</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Produk</th><th>Kategori</th><th class="text-right">Qty</th><th class="text-right">Omzet</th></tr></thead><tbody>${topProducts.map((item) => `<tr><td>${esc(item.name)}</td><td><span class="badge badge-light border">${item.category}</span></td><td class="text-right">${item.qty}</td><td class="text-right">${money(item.total)}</td></tr>`).join("") || `<tr><td colspan="4" class="dash-empty">Belum ada penjualan produk bulan ini.</td></tr>`}</tbody></table></div></div></div></div><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-list mr-1"></i> Transaksi Terbaru</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Waktu</th><th>Meja</th><th>Metode</th><th>Status</th><th class="text-right">Total</th></tr></thead><tbody>${state.orders.slice(0, 5).map((order) => `<tr><td>${orderDate(order).toLocaleDateString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td><span class="badge badge-${order.paid ? "success">Paid" : "warning">Open Bill"}</span></td><td class="text-right">${money(order.total)}</td></tr>`).join("") || `<tr><td colspan="5" class="dash-empty">Belum ada transaksi.</td></tr>`}</tbody></table></div></div></div></div></div></div></section>`;
+  return `<section class="content pt-3"><div class="container-fluid"><div class="dashboard-hero mb-3"><div class="row align-items-center"><div class="col-lg-8"><h4>Halo, ${esc(state.session.user?.name || "Kasir")}!</h4><p class="mt-1">Ringkasan operasional De'Jati hari ini, ${data.now.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}. Anda login sebagai ${esc(state.session.user?.role || "-")}.</p></div><div class="col-lg-4 mt-3 mt-lg-0 text-lg-right"><button class="btn btn-light btn-sm" data-page="transaksi"><i class="fas fa-cash-register"></i> Buka Transaksi</button><button class="btn btn-outline-light btn-sm" data-page="history"><i class="fas fa-history"></i> History Transaksi</button></div></div></div><div class="row">${stat("Omzet Hari Ini", money(data.todaySummary.total), `${data.revenueChange >= 0 ? "+" : ""}${data.revenueChange}% vs kemarin`, "fa-wallet", "success")}${stat("Total Transaksi Hari Ini", data.todaySummary.count.toLocaleString("id-ID"), `${data.transactionChange >= 0 ? "+" : ""}${data.transactionChange}% vs kemarin`, "fa-receipt", "info")}${stat("Rata-rata Belanja", money(average), `${openBills} open bill belum final`, "fa-chart-line", "warning")}${stat("Nett Hari Ini", money(data.todaySummary.total - reportExpense(data.now)), `Pengeluaran ${money(reportExpense(data.now))}`, "fa-balance-scale", "primary")}</div><div class="row"><div class="col-xl-8"><div class="card dash-card"><div class="card-header"><div class="row align-items-center"><div class="col-md-7"><h3 class="card-title mb-0"><i class="fas fa-chart-area mr-1"></i> Trend Histori Transaksi</h3></div><div class="col-md-5 mt-2 mt-md-0"><select id="dashboardTrendRange" class="form-control form-control-sm"><option value="today">Hari Ini per Jam</option><option value="week">Minggu Ini</option><option value="month" ${state.dashboardRange === "month" ? "selected" : ""}>Bulan Ini</option><option value="year">Tahun Ini</option></select></div></div></div><div class="card-body"><div class="dash-chart-wrap"><canvas id="dashboardTrendChart"></canvas></div></div></div></div><div class="col-xl-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-layer-group mr-1"></i> Ringkasan Periode</h3></div><div class="card-body p-0"><table class="table table-striped dash-table mb-0"><thead><tr><th>Periode</th><th class="text-right">Transaksi</th><th class="text-right">Omzet</th></tr></thead><tbody>${periodRow("Hari Ini", data.todaySummary)}${periodRow("Minggu Ini", data.week)}${periodRow("Bulan Ini", data.monthSummary)}${periodRow("Tahun Ini", data.year)}</tbody></table></div></div><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-clock mr-1"></i> Jam Tersibuk Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between align-items-center"><div><div class="dash-stat-value">${data.today.length ? `${String(orderDate(data.today[0]).getHours()).padStart(2, "0")}:00` : "-"}</div><div class="dash-stat-note">${data.todaySummary.count} transaksi, ${money(data.todaySummary.total)}</div></div><span class="dash-icon bg-secondary"><i class="fas fa-stopwatch"></i></span></div></div></div></div></div><div class="row"><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-credit-card mr-1"></i> Metode Pembayaran Hari Ini</h3></div><div class="card-body">${payment.map(([label, value, color]) => `<div class="mb-2"><div class="d-flex justify-content-between"><span>${label}</span><strong>${money(value)}</strong></div><div class="progress progress-sm"><div class="progress-bar bg-${color}" style="width:${data.todaySummary.total ? Math.round((value / data.todaySummary.total) * 100) : 0}%"></div></div></div>`).join("")}</div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-store mr-1"></i> Cafe vs Carwash Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between mb-2"><span>Cafe</span><strong>${money(data.todaySummary.cafe)}</strong></div><div class="d-flex justify-content-between"><span>Carwash</span><strong>${money(data.todaySummary.carwash)}</strong></div></div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-info-circle mr-1"></i> Info Operasional</h3></div><div class="card-body"><div class="info-box bg-light"><span class="info-box-icon bg-info"><i class="fas fa-users"></i></span><div class="info-box-content"><span class="info-box-text">Pengguna Aktif</span><span class="info-box-number">1 / 1</span></div></div><div class="info-box bg-light"><span class="info-box-icon bg-success"><i class="fas fa-mug-hot"></i></span><div class="info-box-content"><span class="info-box-text">Total Produk Terdaftar</span><span class="info-box-number">${state.products.length}</span></div></div><div class="info-box bg-light mb-0"><span class="info-box-icon bg-warning"><i class="fas fa-file-invoice"></i></span><div class="info-box-content"><span class="info-box-text">Open Bill Hari Ini</span><span class="info-box-number">${openBills}</span></div></div></div></div></div></div><div class="row"><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-star mr-1"></i> Produk Terlaris Bulan Ini</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Produk</th><th>Kategori</th><th class="text-right">Qty</th><th class="text-right">Omzet</th></tr></thead><tbody>${topProducts.map((item) => `<tr><td>${esc(item.name)}</td><td><span class="badge badge-light border">${item.category}</span></td><td class="text-right">${item.qty}</td><td class="text-right">${money(item.total)}</td></tr>`).join("") || `<tr><td colspan="4" class="dash-empty">Belum ada penjualan produk bulan ini.</td></tr>`}</tbody></table></div></div></div></div><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-list mr-1"></i> Transaksi Terbaru</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Waktu</th><th>Meja</th><th>Metode</th><th>Status</th><th class="text-right">Total</th></tr></thead><tbody>${reportingOrders().slice(0, 5).map((order) => `<tr><td>${orderDate(order).toLocaleDateString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td><span class="badge badge-${order.paid ? "success">Paid" : "warning">Open Bill"}</span></td><td class="text-right">${money(order.total)}</td></tr>`).join("") || `<tr><td colspan="5" class="dash-empty">Belum ada transaksi.</td></tr>`}</tbody></table></div></div></div></div></div></div></section>`;
 */
 }
 function transactionView() {
@@ -445,22 +481,7 @@ function transactionView() {
       .join("") || `<p class="text-muted p-3">${state.products.length ? "Produk tidak ditemukan." : "Katalog belum tersedia. Sinkronisasi database akan berjalan saat halaman dimuat."}</p>`
   }</div></div></div></div></div></div></section>`;
 }
-function reportView() {
-  const names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-  const grouped = state.orders.reduce((days, order) => {
-    const date = orderDate(order);
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-    if (state.reportMonth && String(date.getMonth() + 1).padStart(2, "0") !== state.reportMonth) return days;
-    days[key] ||= [];
-    days[key].push(order);
-    return days;
-  }, {});
-  const rows = Object.entries(grouped).sort(([left], [right]) => right.localeCompare(left)).map(([date, orders]) => {
-    const summary = orderSummary(orders);
-    return `<tr><td>${date}</td><td>${money(summary.total)}</td><td>${money(summary.cash)}</td><td>${money(summary.qris)}</td><td>${money(summary.card)}</td><td>${money(summary.cafe)}</td><td>${money(summary.carwash)}</td><td><span class="badge badge-danger">Rp 0</span></td><td><button class="btn btn-sm btn-info" data-report-date="${date}">Lihat</button></td></tr>`;
-  }).join("");
-  return `<section class="content pt-3"><div class="container-fluid"><div class="card"><div class="card-header d-flex justify-content-between align-items-center"><h4 class="mb-0">Daily Report (Closingan)</h4><form class="form-inline mb-0" id="report-filter"><div class="input-group input-group-sm"><select name="month" class="form-control"><option value="">-- All Months --</option>${names.map((name, index) => { const value = String(index + 1).padStart(2, "0"); return `<option value="${value}" ${state.reportMonth === value ? "selected" : ""}>${name}</option>`; }).join("")}</select><div class="input-group-append"><button class="btn btn-primary">Filter</button><button type="button" class="btn btn-secondary" data-action="reset-report">Reset</button></div></div></form></div><div class="card-body table-responsive"><table class="table table-bordered table-striped table-hover"><thead class="thead-dark"><tr><th>Tanggal</th><th>Total Penjualan</th><th>Cash</th><th>QRIS</th><th>Kartu</th><th>Cafe</th><th>Carwash</th><th>Total Pengeluaran</th><th>Detail</th></tr></thead><tbody>${rows || `<tr><td colspan="9" class="text-center text-muted">Belum ada transaksi lokal.</td></tr>`}</tbody></table></div></div></div></section>`;
-}
+function reportView() { return reports.view(state.page); }
 function paymentModal() {
   return `<div class="modal-backdrop-mobile" id="payModal"><div class="modal-dialog"><form class="modal-content" id="pay-form"><div class="modal-header bg-primary text-white"><h5 class="modal-title">Payment</h5><button class="close text-white" type="button" data-close>&times;</button></div><div class="modal-body"><div class="form-group"><label for="table-number">Table Number</label><input class="form-control" id="table-number" name="table" value="${esc(state.table)}" placeholder="e.g. A1 / VIP 2 / Takeaway" required></div><div class="form-group"><label for="payment-method">Payment Method</label><select class="form-control" id="payment-method" name="method" required><option value="">-- Select Method --</option><option value="cash">Cash</option><option value="credit_card">Credit Card</option><option value="qris">QRIS</option></select></div><div class="form-group"><label>Subtotal</label><input class="form-control" id="modal-subtotal" readonly></div><div class="form-group"><label for="payment-discount">Discount (%)</label><input class="form-control" id="payment-discount" name="discount" inputmode="numeric" placeholder="0" value="0"><small class="form-text text-muted">Example: enter 10 for 10% discount.</small></div><div class="form-group"><label>Grand Total</label><input class="form-control" id="modal-total" readonly></div><div class="form-group"><label for="customer-pay">Customer Pay</label><input class="form-control" id="customer-pay" name="paid" inputmode="numeric" required><div class="btn-group btn-group-sm mt-2"><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="50000">50,000</button><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="100000">100,000</button><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="500000">500,000</button></div></div><div class="form-group"><label>Change</label><input class="form-control" id="change-amount" readonly></div></div><div class="modal-footer justify-content-between"><button class="btn btn-secondary" type="button" data-close>Cancel</button><button class="btn btn-primary">Print Invoice</button></div></form></div></div>`;
 }
@@ -485,13 +506,8 @@ function modalView() {
     return `<div class="modal-backdrop-mobile"><div class="modal-dialog"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title">Pilih Printer ${label}</h5><button class="close text-white" type="button" data-close>&times;</button></div><div class="modal-body">${state.printerLoading ? `<p class="text-muted mb-0"><i class="fas fa-spinner fa-spin mr-1"></i>Membaca perangkat Bluetooth...</p>` : devices || `<p class="text-muted mb-0">Tidak ada perangkat yang sudah dipasangkan. Pasangkan printer dari Pengaturan Bluetooth Android, lalu coba lagi.</p>`}</div><div class="modal-footer"><button class="btn btn-secondary" type="button" data-close>Batal</button></div></div></div></div>`;
   }
   if (state.modal === "pay") return paymentModal();
-  if (state.modal === "report-detail") {
-    const orders = state.orders.filter((order) => {
-      const date = orderDate(order);
-      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}` === state.reportDate;
-    });
-    return `<div class="modal-backdrop-mobile"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Detail Transaksi (${esc(state.reportDate)})</h5><button class="close" type="button" data-close>&times;</button></div><div class="modal-body"><table class="table table-bordered"><thead><tr><th>Meja</th><th>Metode</th><th>Total</th><th>Status</th></tr></thead><tbody>${orders.map((order) => `<tr><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td>${money(order.total)}</td><td>${order.paid ? "Paid" : "Open Bill"}</td></tr>`).join("")}</tbody></table></div><div class="modal-footer"><button class="btn btn-secondary" type="button" data-close>Close</button></div></div></div></div>`;
-  }
+  if (state.modal === "reports") return reports.modal();
+
   if (state.modal === "variant")
     return `<div class="modal-backdrop-mobile" id="variantModal"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title">Select Variant</h5><button class="close text-white" data-close>&times;</button></div><div class="modal-body"><div class="list-group" id="variant-options">${variants(
       state.selected,
@@ -537,7 +553,7 @@ function decorateReferenceSidebar() {
   if (!sidebar) return;
   const user = esc(state.session?.user?.name || "Kasir");
   const nav = (page, icon, label) => `<li class="nav-item" data-sidebar-nav="${label.toLowerCase()}"><a href="#" class="nav-link ${state.page === page ? "active" : ""}" data-page="${page}"><i class="nav-icon fas ${icon}"></i><p>${label}</p></a></li>`;
-  sidebar.innerHTML = `<div class="brand-link d-flex align-items-center"><img src="/server-assets/img/logo-only-white.png" class="brand-image img-circle elevation-3" style="opacity:.8" alt="De'Jati"><span class="brand-text font-weight-light"><b>De'</b>Jati</span></div><div class="sidebar"><div class="user-panel mt-3 pb-3 mb-3 d-flex"><div class="image"><img src="/server-assets/img/user-no-image-gray.png" class="img img-circle elevation-2" alt="User Image"></div><div class="info"><a href="#" class="d-block" data-action="profile-notice">${user}</a></div></div><div class="form-inline"><div class="input-group" data-widget="sidebar-search"><input id="sidebar-search" class="form-control form-control-sidebar" type="search" placeholder="Search" aria-label="Search"><div class="input-group-append"><button class="btn btn-sidebar" type="button" aria-label="Cari menu"><i class="fas fa-search fa-fw"></i></button></div></div></div><nav class="mt-2"><ul class="nav nav-pills nav-sidebar nav-legacy nav-flat nav-child-indent flex-column" data-widget="treeview" role="menu" data-accordion="false">${nav("dashboard", "fa-tachometer-alt", "Dashboard")}${nav("transaksi", "fa-cash-register", "Transaksi")}${nav("report", "fa-calendar-day", "Daily Report")}</ul></nav></div>`;
+  sidebar.innerHTML = `<div class="brand-link d-flex align-items-center"><img src="/server-assets/img/logo-only-white.png" class="brand-image img-circle elevation-3" style="opacity:.8" alt="De'Jati"><span class="brand-text font-weight-light"><b>De'</b>Jati</span></div><div class="sidebar"><div class="user-panel mt-3 pb-3 mb-3 d-flex"><div class="image"><img src="/server-assets/img/user-no-image-gray.png" class="img img-circle elevation-2" alt="User Image"></div><div class="info"><a href="#" class="d-block" data-action="profile-notice">${user}</a></div></div><div class="form-inline"><div class="input-group" data-widget="sidebar-search"><input id="sidebar-search" class="form-control form-control-sidebar" type="search" placeholder="Search" aria-label="Search"><div class="input-group-append"><button class="btn btn-sidebar" type="button" aria-label="Cari menu"><i class="fas fa-search fa-fw"></i></button></div></div></div><nav class="mt-2"><ul class="nav nav-pills nav-sidebar nav-legacy nav-flat nav-child-indent flex-column" data-widget="treeview" role="menu" data-accordion="false">${nav("dashboard", "fa-tachometer-alt", "Dashboard")}${nav("transaksi", "fa-cash-register", "Transaksi")}${nav("history", "fa-history", "History Transaksi")}${nav("report", "fa-calendar-day", "Closing Harian")}</ul></nav></div>`;
 }
 function decorateReferenceNavbar() {
   const navbar = document.querySelector(".main-header");
@@ -545,7 +561,7 @@ function decorateReferenceNavbar() {
   const menuOpen = (name) => state.navbarMenu === name ? "show" : "";
   const user = esc(state.session?.user?.name || "Kasir");
   const role = esc(state.session?.user?.role || "-");
-  navbar.innerHTML = `<ul class="navbar-nav"><li class="nav-item"><a class="nav-link" href="#" data-action="sidebar" role="button" aria-label="Toggle sidebar"><i class="fas fa-bars"></i></a></li><li class="nav-item d-flex align-items-center" id="nav-header"><span class="h5 mb-0">${esc(state.page === "dashboard" ? "Dashboard" : state.page === "transaksi" ? "Transaksi Kasir" : "Daily Report (Closingan)")}</span></li></ul><ul class="navbar-nav ml-auto"><li class="nav-item d-flex align-items-center mr-2" id="navbarPrinterStatus"><span class="badge badge-light border mr-1 small" id="navbarCashierPrinterStatus">Cashier: ${esc(printerName("cashier"))}</span><span class="badge badge-light border small" id="navbarKitchenPrinterStatus">Kitchen: ${esc(printerName("kitchen"))}</span></li><li class="nav-item dropdown ${menuOpen("printer")}"><a class="nav-link" href="#" data-action="menu-printer" role="button" aria-label="Printer menu" title="Printer"><i class="fas fa-print"></i></a><div class="dropdown-menu dropdown-menu-right ${menuOpen("printer")}"><span class="dropdown-item dropdown-header">Bluetooth Printers</span><button type="button" class="dropdown-item" data-action="connect-cashier"><i class="fas fa-cash-register mr-2"></i> Connect Cashier</button><button type="button" class="dropdown-item" data-action="connect-kitchen"><i class="fas fa-utensils mr-2"></i> Connect Kitchen</button><div class="dropdown-divider"></div><button type="button" class="dropdown-item" data-action="test-cashier"><i class="fas fa-receipt mr-2"></i> Test Cashier</button><button type="button" class="dropdown-item" data-action="test-kitchen"><i class="fas fa-receipt mr-2"></i> Test Kitchen</button></div></li><li class="nav-item d-flex align-items-center"><button type="button" class="nav-link btn btn-link theme-toggle" data-action="theme" aria-label="Aktifkan dark mode"></button></li><li class="nav-item ${menuOpen("search")}"><a class="nav-link" href="#" data-action="menu-search" role="button"><i class="fas fa-search"></i></a><div class="navbar-search-block ${menuOpen("search")}"><form class="form-inline" data-navbar-search><div class="input-group input-group-sm"><input class="form-control form-control-navbar" type="search" placeholder="Search" aria-label="Search"><div class="input-group-append"><button class="btn btn-navbar" type="submit"><i class="fas fa-search"></i></button><button class="btn btn-navbar" type="button" data-action="menu-search"><i class="fas fa-times"></i></button></div></div></form></div></li><li class="nav-item dropdown ${menuOpen("notification")}"><a class="nav-link" href="#" data-action="menu-notification"><i class="far fa-bell"></i><span class="badge badge-warning navbar-badge">15</span></a><div class="dropdown-menu dropdown-menu-lg dropdown-menu-right ${menuOpen("notification")}"><span class="dropdown-item dropdown-header">15 Notifications</span><div class="dropdown-divider"></div><span class="dropdown-item"><i class="fas fa-envelope mr-2"></i> 4 new messages<span class="float-right text-muted text-sm">3 mins</span></span><div class="dropdown-divider"></div><span class="dropdown-item"><i class="fas fa-users mr-2"></i> 8 friend requests<span class="float-right text-muted text-sm">12 hours</span></span><div class="dropdown-divider"></div><span class="dropdown-item"><i class="fas fa-file mr-2"></i> 3 new reports<span class="float-right text-muted text-sm">2 days</span></span><div class="dropdown-divider"></div><span class="dropdown-item dropdown-footer">See All Notifications</span></div></li><li class="nav-item"><a class="nav-link" href="#" data-action="fullscreen" role="button"><i class="fas fa-expand-arrows-alt"></i></a></li><li class="nav-item dropdown user-menu ${menuOpen("user")}"><a class="nav-link dropdown-toggle" href="#" data-action="menu-user"><i class="fas fa-cog"></i></a><div class="dropdown-menu dropdown-menu-lg dropdown-menu-right ${menuOpen("user")}"><div class="user-header bg-dark text-center p-3"><img src="/server-assets/img/user-no-image-gray.png" class="img img-circle elevation-2" alt="User Image" width="72"><p class="mb-0 mt-2">${user}</p><p><small class="text-muted">${role}</small></p></div><div class="user-footer d-flex justify-content-between p-2"><button class="btn btn-sm btn-outline-secondary" data-action="profile-notice">Profile</button><button class="btn btn-sm btn-outline-danger" data-action="logout">Log Out</button></div></div></li></ul>`;
+  navbar.innerHTML = `<ul class="navbar-nav"><li class="nav-item"><a class="nav-link" href="#" data-action="sidebar" role="button" aria-label="Toggle sidebar"><i class="fas fa-bars"></i></a></li><li class="nav-item d-flex align-items-center" id="nav-header"><span class="h5 mb-0">${esc(state.page === "dashboard" ? "Dashboard" : state.page === "transaksi" ? "Transaksi Kasir" : state.page === "history" ? "History Transaksi" : "Closing Harian")}</span></li></ul><ul class="navbar-nav ml-auto"><li class="nav-item d-flex align-items-center mr-2" id="navbarPrinterStatus"><span class="badge badge-light border mr-1 small" id="navbarCashierPrinterStatus">Cashier: ${esc(printerName("cashier"))}</span><span class="badge badge-light border small" id="navbarKitchenPrinterStatus">Kitchen: ${esc(printerName("kitchen"))}</span></li><li class="nav-item dropdown ${menuOpen("printer")}"><a class="nav-link" href="#" data-action="menu-printer" role="button" aria-label="Printer menu" title="Printer"><i class="fas fa-print"></i></a><div class="dropdown-menu dropdown-menu-right ${menuOpen("printer")}"><span class="dropdown-item dropdown-header">Bluetooth Printers</span><button type="button" class="dropdown-item" data-action="connect-cashier"><i class="fas fa-cash-register mr-2"></i> Connect Cashier</button><button type="button" class="dropdown-item" data-action="connect-kitchen"><i class="fas fa-utensils mr-2"></i> Connect Kitchen</button><div class="dropdown-divider"></div><button type="button" class="dropdown-item" data-action="test-cashier"><i class="fas fa-receipt mr-2"></i> Test Cashier</button><button type="button" class="dropdown-item" data-action="test-kitchen"><i class="fas fa-receipt mr-2"></i> Test Kitchen</button></div></li><li class="nav-item d-flex align-items-center"><button type="button" class="nav-link btn btn-link theme-toggle" data-action="theme" aria-label="Aktifkan dark mode"></button></li><li class="nav-item ${menuOpen("search")}"><a class="nav-link" href="#" data-action="menu-search" role="button"><i class="fas fa-search"></i></a><div class="navbar-search-block ${menuOpen("search")}"><form class="form-inline" data-navbar-search><div class="input-group input-group-sm"><input class="form-control form-control-navbar" type="search" placeholder="Search" aria-label="Search"><div class="input-group-append"><button class="btn btn-navbar" type="submit"><i class="fas fa-search"></i></button><button class="btn btn-navbar" type="button" data-action="menu-search"><i class="fas fa-times"></i></button></div></div></form></div></li><li class="nav-item dropdown ${menuOpen("notification")}"><a class="nav-link" href="#" data-action="menu-notification"><i class="far fa-bell"></i><span class="badge badge-warning navbar-badge">15</span></a><div class="dropdown-menu dropdown-menu-lg dropdown-menu-right ${menuOpen("notification")}"><span class="dropdown-item dropdown-header">15 Notifications</span><div class="dropdown-divider"></div><span class="dropdown-item"><i class="fas fa-envelope mr-2"></i> 4 new messages<span class="float-right text-muted text-sm">3 mins</span></span><div class="dropdown-divider"></div><span class="dropdown-item"><i class="fas fa-users mr-2"></i> 8 friend requests<span class="float-right text-muted text-sm">12 hours</span></span><div class="dropdown-divider"></div><span class="dropdown-item"><i class="fas fa-file mr-2"></i> 3 new reports<span class="float-right text-muted text-sm">2 days</span></span><div class="dropdown-divider"></div><span class="dropdown-item dropdown-footer">See All Notifications</span></div></li><li class="nav-item"><a class="nav-link" href="#" data-action="fullscreen" role="button"><i class="fas fa-expand-arrows-alt"></i></a></li><li class="nav-item dropdown user-menu ${menuOpen("user")}"><a class="nav-link dropdown-toggle" href="#" data-action="menu-user"><i class="fas fa-cog"></i></a><div class="dropdown-menu dropdown-menu-lg dropdown-menu-right ${menuOpen("user")}"><div class="user-header bg-dark text-center p-3"><img src="/server-assets/img/user-no-image-gray.png" class="img img-circle elevation-2" alt="User Image" width="72"><p class="mb-0 mt-2">${user}</p><p><small class="text-muted">${role}</small></p></div><div class="user-footer d-flex justify-content-between p-2"><button class="btn btn-sm btn-outline-secondary" data-action="profile-notice">Profile</button><button class="btn btn-sm btn-outline-danger" data-action="logout">Log Out</button></div></div></li></ul>`;
 }
 function decorateReferenceToggle() {
   const toggle = document.querySelector("[data-action='theme']");
@@ -649,6 +665,7 @@ function saveOrder(data, openBill = false) {
     return notice("Uang bayar kurang.", "warning");
   const order = {
     id: crypto.randomUUID(),
+    status: openBill ? "OPEN BILL" : "PAID",
     table: state.table,
     method: openBill ? "Open Bill" : data.method,
     subtotal: total(),
@@ -673,10 +690,13 @@ function saveOrder(data, openBill = false) {
       : "Transaksi tersimpan di perangkat.",
     "success",
   );
-  if (!openBill) setTimeout(() => void printCompletedOrder(order), 0);
+  if (!openBill) {
+    setTimeout(() => void printCompletedOrder(order), 0);
+    void sync(true);
+  }
 }
 async function sync(silent = false) {
-  if (!state.session?.token || state.syncing) return;
+  if (!state.session?.token || state.syncing || (silent && state.modal)) return;
   state.syncing = true;
   render();
   try {
@@ -696,7 +716,9 @@ async function sync(silent = false) {
       serverReport,
       catalog.categories || [],
     );
-    for (const order of state.orders.filter((item) => !item.synced)) {
+    let uploadError = null;
+    for (const order of state.orders.filter((item) => !item.synced && orderStatus(item) === "PAID")) {
+      try {
       const saved = await api("orders", state.session.token, {
         method: "POST",
         body: JSON.stringify({
@@ -719,11 +741,19 @@ async function sync(silent = false) {
       });
       await mirrorServerTransaction(order, saved.order_id);
       order.synced = true;
+      order.serverOrderId = saved.order_id;
+      persist();
+      } catch (error) { uploadError = error; break; }
     }
+    const history = await api("report-history", state.session.token);
+    if (!Array.isArray(history.orders)) throw new Error("Data report server tidak valid.");
+    state.serverHistory = history;
     persist();
+    await mirrorReportHistory(history);
+    if (uploadError) throw uploadError;
     if (!silent) notice("Sinkronisasi selesai.", "success");
   } catch (error) {
-    console.error("Catalog synchronization failed:", error);
+    console.error("Synchronization failed:", error);
     if (error.status === 401) {
       state.session = null;
       state.products = [];
@@ -744,9 +774,11 @@ async function sync(silent = false) {
   }
 }
 
-app.addEventListener("click", (event) => {
+app.addEventListener("click", async (event) => {
   const target = event.target.closest("button, tr, a");
   if (!target) return;
+  if (target.dataset.reportAction) { event.preventDefault(); await reports.click(target); return; }
+  if (reports.isBusy()) return;
   if (target.tagName === "A") event.preventDefault();
   if (target.dataset.page) {
     state.page = target.dataset.page;
@@ -882,6 +914,7 @@ app.addEventListener("click", (event) => {
   } else if (action === "print-report") window.print();
 });
 app.addEventListener("input", (event) => {
+  reports.input(event.target);
   if (event.target.id === "product-search") {
     state.search = event.target.value;
     render();
@@ -894,6 +927,7 @@ app.addEventListener("input", (event) => {
   }
 });
 app.addEventListener("change", (event) => {
+  reports.change(event.target);
   if (event.target.id === "dashboardTrendRange") {
     state.dashboardRange = event.target.value;
     dashboardCanvas(document.querySelector("#dashboardTrendChart"), state.dashboardRange);
@@ -903,6 +937,7 @@ app.addEventListener("change", (event) => {
 app.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
+  if (await reports.submit(form)) return;
   if (form.matches("[data-navbar-search]")) {
     state.search = String(new FormData(form).get("search") || form.querySelector("input")?.value || "");
     state.page = "transaksi";
@@ -986,6 +1021,8 @@ document.addEventListener("change", (event) => {
 
 initializeServerMirror()
   .then(async () => {
+    const cachedHistory = await loadReportHistory();
+    if (!state.serverHistory && cachedHistory) state.serverHistory = cachedHistory;
     const cachedCatalog = await loadServerCatalog();
     if (!cachedCatalog) return;
     state.products = Array.isArray(cachedCatalog.products)
@@ -1001,3 +1038,11 @@ initializeServerMirror()
     if (state.session?.token) void sync(true);
     requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.remove("theme-preload")));
   });
+
+window.addEventListener("online", () => void sync(true));
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) void sync(true);
+});
+setInterval(() => {
+  if (!document.hidden && navigator.onLine && state.page !== "transaksi" && !state.modal) void sync(true);
+}, 60000);

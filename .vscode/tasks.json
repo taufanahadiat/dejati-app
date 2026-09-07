@@ -2,6 +2,27 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Android: prepare emulator debug + scrcpy",
+      "type": "process",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\.vscode\\android-debug.ps1",
+        "-Action",
+        "RunAndPrepareDebug"
+      ],
+      "options": {
+        "env": {
+          "NODE_OPTIONS": "",
+          "VSCODE_INSPECTOR_OPTIONS": ""
+        }
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "Android: install + scrcpy (all)",
       "type": "shell",
       "command": "powershell",
