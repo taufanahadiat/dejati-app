@@ -23,6 +23,8 @@ const state = {
   cart: read("dejati-cart", []),
   orders: read("dejati-orders", []),
   serverHistory: read("dejati-server-history", null),
+  activeBill: read("dejati-active-bill", null),
+  historyDrawerOpen: false,
   page: "dashboard",
   category: "all",
   search: "",
@@ -46,6 +48,7 @@ const state = {
 };
 const reports = createReports({
   state, orders: reportingOrders, api, render, persist, notice,
+  loadOpenBill: loadOpenBillForCheckout,
   money, esc, printReceipt,
   refresh: async () => {
     if (state.syncing) throw new Error("Sinkronisasi sedang berjalan. Coba kembali sebentar lagi.");
@@ -87,12 +90,19 @@ function persist() {
   localStorage.setItem("dejati-cart", JSON.stringify(state.cart));
   localStorage.setItem("dejati-orders", JSON.stringify(state.orders));
   localStorage.setItem("dejati-printers", JSON.stringify(state.printers));
+  if (state.activeBill)
+    localStorage.setItem("dejati-active-bill", JSON.stringify(state.activeBill));
+  else localStorage.removeItem("dejati-active-bill");
   if (state.session)
     localStorage.setItem("dejati-session", JSON.stringify(state.session));
   else localStorage.removeItem("dejati-session");
 }
 function money(value) {
   return `Rp ${Number(value || 0).toLocaleString("id-ID")}`;
+}
+function formatDigits(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits ? Number(digits).toLocaleString("id-ID") : "";
 }
 function isNativeApp() {
   return Capacitor.isNativePlatform();
@@ -124,6 +134,41 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+async function sweetConfirm({ title, text, icon = "warning", confirmButtonText = "Ya", cancelButtonText = "Batal", confirmButtonColor = "#dc3545" }) {
+  if (!window.Swal) return confirm(text || title);
+  const result = await window.Swal.fire({
+    title,
+    text,
+    icon,
+    showCancelButton: true,
+    confirmButtonText,
+    cancelButtonText,
+    confirmButtonColor,
+    reverseButtons: true,
+  });
+  return result.isConfirmed;
+}
+async function sweetTextarea({ title, text, placeholder = "", confirmButtonText = "Ya", cancelButtonText = "Batal" }) {
+  if (!window.Swal) {
+    const value = prompt(text || title);
+    return value === null ? null : value;
+  }
+  const result = await window.Swal.fire({
+    title,
+    text,
+    input: "textarea",
+    inputPlaceholder: placeholder,
+    inputAttributes: { maxlength: 5000 },
+    icon: "warning",
+    showCancelButton: true,
+    confirmButtonText,
+    cancelButtonText,
+    confirmButtonColor: "#dc3545",
+    reverseButtons: true,
+    inputValidator: (value) => (!value.trim() ? "Alasan cancel wajib diisi." : undefined),
+  });
+  return result.isConfirmed ? result.value : null;
 }
 function receiptText(order) {
   const date = orderDate(order).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" });
@@ -242,6 +287,85 @@ function total() {
 }
 function reportingOrders() {
   return mergeReportOrders(state.serverHistory?.orders, state.orders);
+}
+function cloneOrderItems(items = []) {
+  return items.map((item) => ({
+    ...item,
+    price: Number(item.price || item.unitPrice || item.finalPrice || 0),
+    qty: Number(item.qty || item.quantity || 1),
+    lineTotal: Number(item.lineTotal ?? Number(item.price || item.unitPrice || item.finalPrice || 0) * Number(item.qty || item.quantity || 1)),
+  }));
+}
+function sameOrderIdentity(order, ref) {
+  if (!order || !ref) return false;
+  return (
+    order.id === ref.id ||
+    order.id === ref.clientOrderId ||
+    order.clientOrderId === ref.id ||
+    order.clientOrderId === ref.clientOrderId ||
+    (order.serverOrderId && String(order.serverOrderId) === String(ref.serverOrderId)) ||
+    (ref.serverOrderId && String(order.id) === String(ref.serverOrderId))
+  );
+}
+function findLocalOrder(ref) {
+  return state.orders.find((order) => sameOrderIdentity(order, ref));
+}
+function loadOpenBillForCheckout(order) {
+  if (orderStatus(order) !== "OPEN BILL") return false;
+  if (
+    state.cart.length &&
+    !state.activeBill &&
+    !confirm("Keranjang saat ini akan diganti dengan data open bill. Lanjutkan?")
+  )
+    return true;
+  state.activeBill = {
+    id: order.id,
+    clientOrderId: order.clientOrderId || order.id,
+    serverOrderId: order.serverOrderId || null,
+    createdAt: order.createdAt || new Date().toISOString(),
+    status: "OPEN BILL",
+    viewOnly: false,
+    fromHistory: false,
+  };
+  state.table = order.table || "";
+  state.cart = cloneOrderItems(order.items || []);
+  state.modal = null;
+  state.selected = null;
+  state.editing = null;
+  state.page = "transaksi";
+  persist();
+  render();
+  notice(`Open bill ${state.table || ""} dimuat ke transaksi.`, "success");
+  return true;
+}
+function loadOrderToSummary(order) {
+  const status = orderStatus(order);
+  if (
+    state.cart.length &&
+    !state.activeBill &&
+    !confirm("Keranjang saat ini akan diganti dengan data history. Lanjutkan?")
+  )
+    return true;
+  state.activeBill = {
+    id: order.id,
+    clientOrderId: order.clientOrderId || order.id,
+    serverOrderId: order.serverOrderId || null,
+    createdAt: order.createdAt || new Date().toISOString(),
+    status,
+    viewOnly: status !== "OPEN BILL",
+    fromHistory: true,
+  };
+  state.table = order.table || "";
+  state.cart = cloneOrderItems(order.items || []);
+  state.modal = null;
+  state.selected = null;
+  state.editing = null;
+  state.page = "transaksi";
+  state.historyDrawerOpen = false;
+  persist();
+  render();
+  notice(`${status === "OPEN BILL" ? "Open bill" : "Transaksi"} ${state.table || ""} dimuat ke Order Summary.`, "success");
+  return true;
 }
 function reportExpense(date) {
   const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -370,6 +494,15 @@ function setTheme() {
   document.body.classList.toggle("dark-mode", dark);
   localStorage.setItem("adminlte-theme-mode", state.theme);
 }
+function setBodyLayout() {
+  document.body.classList.add("hold-transition");
+  document.body.classList.toggle("login-page", !state.session);
+  document.body.classList.toggle("sidebar-mini", Boolean(state.session));
+  document.body.classList.toggle("layout-fixed", Boolean(state.session));
+  document.body.classList.toggle("layout-navbar-fixed", Boolean(state.session));
+  document.body.classList.toggle("sidebar-open", Boolean(state.session && state.sidebarOpen));
+  document.body.classList.toggle("sidebar-collapse", Boolean(state.session && !state.sidebarOpen));
+}
 async function api(path, token = "", init = {}) {
   const headers = {
     "Content-Type": "application/json",
@@ -429,7 +562,7 @@ function shell(content) {
       : state.page === "transaksi"
         ? "Transaksi Kasir"
         : state.page === "history" ? "History Transaksi" : "Closing Harian";
-  return `<div class="wrapper hold-transition sidebar-mini layout-fixed layout-navbar-fixed ${state.sidebarOpen ? "sidebar-open" : "sidebar-collapse"}"><nav class="main-header navbar navbar-expand ${state.theme === "dark" ? "navbar-dark navbar-gray-dark" : "navbar-white navbar-light"}"><button class="nav-link btn-nav" data-action="sidebar"><i class="fas fa-bars"></i></button><span class="h5 mb-0">${title}</span><div class="ml-auto"><button class="btn btn-sm btn-outline-primary mr-2" data-action="sync" ${state.syncing ? "disabled" : ""}><i class="fas fa-sync-alt ${state.syncing ? "fa-spin" : ""}"></i> ${state.syncing ? "Sync..." : "Sync"}</button><button class="btn btn-sm btn-link" data-action="theme" aria-label="Ganti tema"><i class="fas fa-${state.theme === "dark" ? "sun" : "moon"}"></i></button></div></nav><aside class="main-sidebar sidebar-dark-primary elevation-4"><a class="brand-link"><img src="/server-assets/img/logo-only-white.png" class="brand-image"><span class="brand-text font-weight-light"><b>De'</b>Jati</span></a><div class="sidebar"><div class="user-panel mt-3 pb-3 mb-3 d-flex"><img src="/server-assets/img/user-no-image-gray.png" class="img-circle elevation-2" width="34"><div class="info"><span>${esc(user)}</span></div></div><nav><ul class="nav nav-pills nav-sidebar flex-column"><li class="nav-item"><button class="nav-link nav-button ${state.page === "dashboard" ? "active" : ""}" data-page="dashboard"><i class="nav-icon fas fa-tachometer-alt"></i><p>Dashboard</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "transaksi" ? "active" : ""}" data-page="transaksi"><i class="nav-icon fas fa-cash-register"></i><p>Transaksi</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "report" ? "active" : ""}" data-page="report"><i class="nav-icon fas fa-calendar-day"></i><p>Closing Harian</p></button></li><li class="nav-item mt-3"><button class="nav-link nav-button" data-action="logout"><i class="nav-icon fas fa-sign-out-alt"></i><p>Logout</p></button></li></ul></nav></div></aside><div class="content-wrapper">${content}</div></div>`;
+  return `<div class="wrapper"><nav class="main-header navbar navbar-expand ${state.theme === "dark" ? "navbar-dark navbar-gray-dark" : "navbar-white navbar-light"}"><button class="nav-link btn-nav" data-action="sidebar"><i class="fas fa-bars"></i></button><span class="h5 mb-0">${title}</span><div class="ml-auto"><button class="btn btn-sm btn-outline-primary mr-2" data-action="sync" ${state.syncing ? "disabled" : ""}><i class="fas fa-sync-alt ${state.syncing ? "fa-spin" : ""}"></i> ${state.syncing ? "Sync..." : "Sync"}</button><button class="btn btn-sm btn-link" data-action="theme" aria-label="Ganti tema"><i class="fas fa-${state.theme === "dark" ? "sun" : "moon"}"></i></button></div></nav><aside class="main-sidebar sidebar-dark-primary elevation-4"><a class="brand-link"><img src="/server-assets/img/logo-only-white.png" class="brand-image"><span class="brand-text font-weight-light"><b>De'</b>Jati</span></a><div class="sidebar"><div class="user-panel mt-3 pb-3 mb-3 d-flex"><img src="/server-assets/img/user-no-image-gray.png" class="img-circle elevation-2" width="34"><div class="info"><span>${esc(user)}</span></div></div><nav><ul class="nav nav-pills nav-sidebar flex-column"><li class="nav-item"><button class="nav-link nav-button ${state.page === "dashboard" ? "active" : ""}" data-page="dashboard"><i class="nav-icon fas fa-tachometer-alt"></i><p>Dashboard</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "transaksi" ? "active" : ""}" data-page="transaksi"><i class="nav-icon fas fa-cash-register"></i><p>Transaksi</p></button></li><li class="nav-item"><button class="nav-link nav-button ${state.page === "report" ? "active" : ""}" data-page="report"><i class="nav-icon fas fa-calendar-day"></i><p>Closing Harian</p></button></li><li class="nav-item mt-3"><button class="nav-link nav-button" data-action="logout"><i class="nav-icon fas fa-sign-out-alt"></i><p>Logout</p></button></li></ul></nav></div></aside><div class="content-wrapper">${content}</div></div>`;
 }
 function dashboardContent(data, average, openBills, stat, periodRow, payment, topProducts) {
   const recent = reportingOrders().slice(0, 5).map((order) => `<tr><td>${orderDate(order).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td><span class="badge badge-${orderStatus(order) === "PAID" ? "success" : orderStatus(order) === "CANCEL" ? "danger" : "warning"}">${orderStatus(order)}</span></td><td class="text-right">${money(order.total)}</td></tr>`).join("");
@@ -453,37 +586,128 @@ function dashboardView() {
   return `<section class="content pt-3"><div class="container-fluid"><div class="dashboard-hero mb-3"><div class="row align-items-center"><div class="col-lg-8"><h4>Halo, ${esc(state.session.user?.name || "Kasir")}!</h4><p class="mt-1">Ringkasan operasional De'Jati hari ini, ${data.now.toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" })}. Anda login sebagai ${esc(state.session.user?.role || "-")}.</p></div><div class="col-lg-4 mt-3 mt-lg-0 text-lg-right"><button class="btn btn-light btn-sm" data-page="transaksi"><i class="fas fa-cash-register"></i> Buka Transaksi</button><button class="btn btn-outline-light btn-sm" data-page="history"><i class="fas fa-history"></i> History Transaksi</button></div></div></div><div class="row">${stat("Omzet Hari Ini", money(data.todaySummary.total), `${data.revenueChange >= 0 ? "+" : ""}${data.revenueChange}% vs kemarin`, "fa-wallet", "success")}${stat("Total Transaksi Hari Ini", data.todaySummary.count.toLocaleString("id-ID"), `${data.transactionChange >= 0 ? "+" : ""}${data.transactionChange}% vs kemarin`, "fa-receipt", "info")}${stat("Rata-rata Belanja", money(average), `${openBills} open bill belum final`, "fa-chart-line", "warning")}${stat("Nett Hari Ini", money(data.todaySummary.total - reportExpense(data.now)), `Pengeluaran ${money(reportExpense(data.now))}`, "fa-balance-scale", "primary")}</div><div class="row"><div class="col-xl-8"><div class="card dash-card"><div class="card-header"><div class="row align-items-center"><div class="col-md-7"><h3 class="card-title mb-0"><i class="fas fa-chart-area mr-1"></i> Trend Histori Transaksi</h3></div><div class="col-md-5 mt-2 mt-md-0"><select id="dashboardTrendRange" class="form-control form-control-sm"><option value="today">Hari Ini per Jam</option><option value="week">Minggu Ini</option><option value="month" ${state.dashboardRange === "month" ? "selected" : ""}>Bulan Ini</option><option value="year">Tahun Ini</option></select></div></div></div><div class="card-body"><div class="dash-chart-wrap"><canvas id="dashboardTrendChart"></canvas></div></div></div></div><div class="col-xl-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-layer-group mr-1"></i> Ringkasan Periode</h3></div><div class="card-body p-0"><table class="table table-striped dash-table mb-0"><thead><tr><th>Periode</th><th class="text-right">Transaksi</th><th class="text-right">Omzet</th></tr></thead><tbody>${periodRow("Hari Ini", data.todaySummary)}${periodRow("Minggu Ini", data.week)}${periodRow("Bulan Ini", data.monthSummary)}${periodRow("Tahun Ini", data.year)}</tbody></table></div></div><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-clock mr-1"></i> Jam Tersibuk Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between align-items-center"><div><div class="dash-stat-value">${data.today.length ? `${String(orderDate(data.today[0]).getHours()).padStart(2, "0")}:00` : "-"}</div><div class="dash-stat-note">${data.todaySummary.count} transaksi, ${money(data.todaySummary.total)}</div></div><span class="dash-icon bg-secondary"><i class="fas fa-stopwatch"></i></span></div></div></div></div></div><div class="row"><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-credit-card mr-1"></i> Metode Pembayaran Hari Ini</h3></div><div class="card-body">${payment.map(([label, value, color]) => `<div class="mb-2"><div class="d-flex justify-content-between"><span>${label}</span><strong>${money(value)}</strong></div><div class="progress progress-sm"><div class="progress-bar bg-${color}" style="width:${data.todaySummary.total ? Math.round((value / data.todaySummary.total) * 100) : 0}%"></div></div></div>`).join("")}</div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-store mr-1"></i> Cafe vs Carwash Hari Ini</h3></div><div class="card-body"><div class="d-flex justify-content-between mb-2"><span>Cafe</span><strong>${money(data.todaySummary.cafe)}</strong></div><div class="d-flex justify-content-between"><span>Carwash</span><strong>${money(data.todaySummary.carwash)}</strong></div></div></div></div><div class="col-lg-4"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-info-circle mr-1"></i> Info Operasional</h3></div><div class="card-body"><div class="info-box bg-light"><span class="info-box-icon bg-info"><i class="fas fa-users"></i></span><div class="info-box-content"><span class="info-box-text">Pengguna Aktif</span><span class="info-box-number">1 / 1</span></div></div><div class="info-box bg-light"><span class="info-box-icon bg-success"><i class="fas fa-mug-hot"></i></span><div class="info-box-content"><span class="info-box-text">Total Produk Terdaftar</span><span class="info-box-number">${state.products.length}</span></div></div><div class="info-box bg-light mb-0"><span class="info-box-icon bg-warning"><i class="fas fa-file-invoice"></i></span><div class="info-box-content"><span class="info-box-text">Open Bill Hari Ini</span><span class="info-box-number">${openBills}</span></div></div></div></div></div></div><div class="row"><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-star mr-1"></i> Produk Terlaris Bulan Ini</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Produk</th><th>Kategori</th><th class="text-right">Qty</th><th class="text-right">Omzet</th></tr></thead><tbody>${topProducts.map((item) => `<tr><td>${esc(item.name)}</td><td><span class="badge badge-light border">${item.category}</span></td><td class="text-right">${item.qty}</td><td class="text-right">${money(item.total)}</td></tr>`).join("") || `<tr><td colspan="4" class="dash-empty">Belum ada penjualan produk bulan ini.</td></tr>`}</tbody></table></div></div></div></div><div class="col-xl-6"><div class="card dash-card"><div class="card-header"><h3 class="card-title mb-0"><i class="fas fa-list mr-1"></i> Transaksi Terbaru</h3></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped dash-table mb-0"><thead><tr><th>Waktu</th><th>Meja</th><th>Metode</th><th>Status</th><th class="text-right">Total</th></tr></thead><tbody>${reportingOrders().slice(0, 5).map((order) => `<tr><td>${orderDate(order).toLocaleDateString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td>${esc(String(order.method || "-").replace("_", " "))}</td><td><span class="badge badge-${order.paid ? "success">Paid" : "warning">Open Bill"}</span></td><td class="text-right">${money(order.total)}</td></tr>`).join("") || `<tr><td colspan="5" class="dash-empty">Belum ada transaksi.</td></tr>`}</tbody></table></div></div></div></div></div></div></section>`;
 */
 }
-function transactionView() {
-  const filtered = state.products.filter(
+function filteredProducts() {
+  return state.products.filter(
     (p) =>
       (isAllCategory(state.category) || p.category === state.category) &&
       p.name.toLowerCase().includes(state.search.toLowerCase()),
   );
-  return `<section class="content pt-3"><div class="container-fluid p-0"><div class="row"><div class="col-lg-4 mt-3 mt-lg-0"><div class="position-sticky order-panel"><div class="card d-flex flex-column order-card"><div class="card-header bg-primary text-white"><h5 class="mb-0">Order Summary</h5></div><div class="card-body d-flex flex-column p-2 overflow-auto"><div class="table-responsive flex-grow-1 overflow-auto"><table class="table table-sm mb-3 text-center" id="order-table"><thead class="bg-light"><tr><th>Item</th><th style="width:90px">Price</th><th style="width:60px">Qty</th><th style="width:90px">Total</th></tr></thead><tbody>${state.cart.length ? state.cart.map((item, index) => `<tr class="cart-row" data-edit="${index}"><td class="text-left ${item.hold ? "text-danger" : ""}">${esc(item.name)}${item.notes ? `<small class="d-block text-muted">**${esc(item.notes)}</small>` : ""}</td><td>${money(item.price)}</td><td>${item.qty}</td><td>${money(item.price * item.qty)}</td></tr>`).join("") : ""}</tbody></table></div><div class="mt-auto border-top pt-2"><h5>Total: <span id="total-amount">${money(total())}</span></h5><button class="btn btn-success btn-block mt-2" id="payNow" data-action="pay">Pay Now</button><button class="btn btn-info btn-block mb-2" id="openBill" data-action="bill">Open Bill</button><button class="btn btn-danger btn-block mt-2" id="clearCart" data-action="clear">Clear Transaction</button></div></div></div></div></div><div class="col-lg-8"><input id="product-search" class="form-control mb-2" value="${esc(state.search)}" placeholder="Search product..."><ul class="nav nav-pills d-flex justify-content-start nav-pills-custom border rounded p-1 mb-2" id="categoryTabs" role="tablist">${categories()
+}
+function productListView(products = filteredProducts()) {
+  return products
+    .map(
+      (product) =>
+        `<div class="col-md-2 col-4 mb-2 px-1 product-column" data-category="${esc(product.category)}" data-name="${esc(product.name.toLowerCase())}"><button class="card product-card shadow-sm p-1" data-product="${esc(product.id)}">${productImage(product) ? `<img class="card-img-top p-1 mx-auto d-block" src="${esc(productImage(product))}" alt="${esc(product.name)}" width="100" height="100">` : `<div class="product-no-img card-img-top p-1">${esc(
+          product.name
+            .split(/\s+/)
+            .map((word) => word[0])
+            .join("")
+            .slice(0, 3),
+        )}</div>`}<div class="card-body text-center p-2"><h6 class="product-title mb-1 text-left">${esc(product.name)}</h6><p class="product-price mb-0 text-right text-muted">${money(variants(product)[0]?.price || product.price)}</p></div></button></div>`,
+    )
+    .join("") || `<p class="text-muted p-3">${state.products.length ? "Produk tidak ditemukan." : "Katalog belum tersedia. Sinkronisasi database akan berjalan saat halaman dimuat."}</p>`;
+}
+function updateProductList() {
+  const list = document.querySelector("#product-list");
+  if (list) list.innerHTML = productListView();
+}
+function updateCategoryTabs() {
+  document.querySelectorAll("[data-category]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.category === state.category);
+  });
+}
+function currentCartOrder() {
+  return {
+    id: state.activeBill?.id || "current-order",
+    table: state.table || "-",
+    method: "-",
+    subtotal: total(),
+    discount: 0,
+    total: total(),
+    paid: 0,
+    change: 0,
+    createdAt: new Date().toISOString(),
+    items: cloneOrderItems(state.cart),
+  };
+}
+function todayHistoryOrders() {
+  const now = new Date();
+  return reportingOrders().filter((order) => sameDay(orderDate(order), now));
+}
+function historyDrawerView(orders) {
+  const rows = orders
+    .map((order, index) => {
+      const status = orderStatus(order);
+      const badge = status === "PAID" ? "success" : status === "CANCEL" ? "danger" : "warning";
+      return `<tr class="history-order-row" data-history-index="${index}"><td>${orderDate(order).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}</td><td>${esc(order.table || "-")}</td><td><span class="badge badge-${badge}">${status}</span></td><td class="text-right">${money(order.total)}</td></tr>`;
+    })
+    .join("");
+  return `<div class="order-history-backdrop ${state.historyDrawerOpen ? "show" : ""}" data-action="close-history"></div><aside class="order-history-drawer ${state.historyDrawerOpen ? "show" : ""}" aria-hidden="${state.historyDrawerOpen ? "false" : "true"}"><div class="order-history-header"><h6 class="mb-0"><i class="fas fa-history mr-1"></i> History Hari Ini</h6><button type="button" class="close" data-action="close-history" aria-label="Tutup">&times;</button></div><div class="table-responsive order-history-table"><table class="table table-sm table-hover mb-0"><thead><tr><th>Time</th><th>Table</th><th>Status</th><th class="text-right">Total</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="text-muted text-center py-3">Belum ada transaksi hari ini.</td></tr>`}</tbody></table></div></aside>`;
+}
+function canEditCart() {
+  return !state.activeBill?.viewOnly;
+}
+function canEditSummaryItems() {
+  if (!state.activeBill) return true;
+  return state.activeBill.status !== "CANCEL";
+}
+async function cancelSummaryOrder() {
+  if (!state.activeBill) return notice("Pilih transaksi dari history terlebih dahulu.", "warning");
+  const reason = await sweetTextarea({
+    title: "Cancel Transaction",
+    text: "Masukkan alasan cancel transaction.",
+    placeholder: "Alasan cancel...",
+    confirmButtonText: "Cancel Transaction",
+  });
+  if (reason === null) return;
+  if (!reason.trim()) return notice("Alasan cancel wajib diisi.", "warning");
+  const local = findLocalOrder(state.activeBill);
+  const existing = local || reportingOrders().find((order) => sameOrderIdentity(order, state.activeBill));
+  if (!existing) return notice("Data transaksi tidak ditemukan.", "warning");
+  if (orderStatus(existing) === "CANCEL") return notice("Transaksi ini sudah cancel.", "info");
+  if (existing.serverOrderId && state.session?.token) {
+    if (!navigator.onLine) return notice("Cancel transaksi server memerlukan koneksi internet.", "warning");
+    await api("order-cancel", state.session.token, {
+      method: "POST",
+      body: JSON.stringify({ id: existing.serverOrderId, reason: reason.trim() }),
+    });
+  }
+  const update = { status: "CANCEL", cancelReason: reason.trim(), canceledAt: new Date().toISOString() };
+  Object.assign(existing, update);
+  if (local && local !== existing) Object.assign(local, update);
+  if (!local && !state.serverHistory?.orders?.some((order) => sameOrderIdentity(order, existing)))
+    state.orders.unshift({ ...existing, ...update, synced: false });
+  state.activeBill = { ...state.activeBill, status: "CANCEL", viewOnly: true };
+  persist();
+  render();
+  notice("Status order berhasil diubah menjadi CANCEL.", "success");
+  if (navigator.onLine) void sync(true);
+}
+function orderActionButton(action, icon, label, color = "secondary", size = "sm", disabled = false) {
+  return `<button type="button" class="btn btn-${color} btn-sm order-action-btn order-action-${size}" data-action="${action}" ${disabled ? "disabled" : ""}><i class="fas ${icon}"></i><small>${label}</small></button>`;
+}
+function transactionView() {
+  const historyOrders = todayHistoryOrders();
+  const editable = canEditCart();
+  const summaryItemsEditable = canEditSummaryItems();
+  const selectedStatus = state.activeBill?.status || "";
+  const activeBillBadge = state.activeBill ? `<span class="badge badge-${editable ? "warning" : "secondary"} ml-2">${editable ? "Open Bill" : "History"}</span>` : "";
+  const isHistoryOrder = Boolean(state.activeBill?.fromHistory || state.activeBill?.viewOnly);
+  const cancelDisabled = !isHistoryOrder || selectedStatus === "CANCEL";
+  const cancelAction = orderActionButton("cancel-transaction", "fa-ban", "Cancel Transaksi", "danger", "sm", cancelDisabled);
+  const orderActions = `<div class="order-primary-actions">${orderActionButton("pay", "fa-money-bill-wave", "Pay Now", "success", "lg", !editable)}${orderActionButton("bill", "fa-file-alt", "Open Bill", "info", "lg", !editable)}</div><div class="order-action-grid">${orderActionButton("print-chit", "fa-receipt", "Print Chit", "secondary")}${orderActionButton("print-invoice-cashier", "fa-file-invoice", "Print Invoice", "primary")}${cancelAction}</div>`;
+  return `<section class="content transaction-screen pt-3"><div class="container-fluid p-0"><div class="row transaction-row"><div class="col-lg-4"><div class="position-sticky order-panel"><div class="card d-flex flex-column order-card"><div class="card-header bg-primary text-white order-summary-header"><h5 class="mb-0 order-summary-title">Order Summary${activeBillBadge}</h5><div class="order-header-actions"><button type="button" class="btn btn-sm btn-danger order-header-btn" data-action="clear"><i class="fas fa-trash"></i><small>Clear</small></button><button type="button" class="btn btn-sm btn-light order-history-toggle" data-action="toggle-history"><i class="fas fa-history"></i><small>History</small></button></div></div><div class="card-body d-flex flex-column p-2"><div class="table-responsive flex-grow-1 order-items-scroll"><table class="table table-sm mb-3 text-center" id="order-table"><thead class="bg-light"><tr><th>Item</th><th style="width:90px">Price</th><th style="width:60px">Qty</th><th style="width:90px">Total</th></tr></thead><tbody>${state.cart.length ? state.cart.map((item, index) => `<tr class="cart-row" ${summaryItemsEditable ? `data-edit="${index}"` : ""}><td class="text-left ${item.hold ? "text-danger" : ""}">${esc(item.name)}${item.notes ? `<small class="d-block text-muted">**${esc(item.notes)}</small>` : ""}</td><td>${money(item.price)}</td><td>${item.qty}</td><td>${money(item.price * item.qty)}</td></tr>`).join("") : ""}</tbody></table></div><div class="order-summary-footer border-top pt-2"><h5 class="order-total-label">Total: <span id="total-amount">${money(total())}</span></h5>${orderActions}</div></div></div></div></div><div class="col-lg-8 transaction-products-panel"><div class="product-filter-bar"><input id="product-search" class="form-control mb-2" value="${esc(state.search)}" placeholder="Search product..."><ul class="nav nav-pills d-flex justify-content-start nav-pills-custom border rounded p-1 mb-2" id="categoryTabs" role="tablist">${categories()
     .map(
       (category) =>
         `<li class="nav-item mr-1" role="presentation"><button class="order-cat nav-link btn btn-outline btn-sm p-1 flex-column align-items-center ${category.id === state.category ? "active" : ""}" data-category="${esc(category.id)}"><span class="material-symbols-outlined">${esc(category.icon)}</span><span class="text-dark text-bold d-block">${esc(category.label)}</span></button></li>`,
     )
     .join(
       "",
-    )}</ul><div class="card shadow-sm product-grid-card"><div class="card-body"><div class="row justify-content-left" id="product-list">${
-    filtered
-      .map(
-        (product) =>
-          `<div class="col-md-2 col-4 mb-2 px-1 product-column" data-category="${esc(product.category)}" data-name="${esc(product.name.toLowerCase())}"><button class="card product-card shadow-sm p-1" data-product="${esc(product.id)}">${productImage(product) ? `<img class="card-img-top p-1 mx-auto d-block" src="${esc(productImage(product))}" alt="${esc(product.name)}" width="100" height="100">` : `<div class="product-no-img card-img-top p-1">${esc(
-            product.name
-              .split(/\s+/)
-              .map((word) => word[0])
-              .join("")
-              .slice(0, 3),
-          )}</div>`}<div class="card-body text-center p-2"><h6 class="product-title mb-1 text-left">${esc(product.name)}</h6><p class="product-price mb-0 text-right text-muted">${money(variants(product)[0]?.price || product.price)}</p></div></button></div>`,
-      )
-      .join("") || `<p class="text-muted p-3">${state.products.length ? "Produk tidak ditemukan." : "Katalog belum tersedia. Sinkronisasi database akan berjalan saat halaman dimuat."}</p>`
-  }</div></div></div></div></div></div></section>`;
+    )}</ul></div><div class="card shadow-sm product-grid-card"><div class="card-body"><div class="row justify-content-left" id="product-list">${productListView()}</div></div></div></div></div></div>${historyDrawerView(historyOrders)}</section>`;
 }
 function reportView() { return reports.view(state.page); }
 function paymentModal() {
-  return `<div class="modal-backdrop-mobile" id="payModal"><div class="modal-dialog"><form class="modal-content" id="pay-form"><div class="modal-header bg-primary text-white"><h5 class="modal-title">Payment</h5><button class="close text-white" type="button" data-close>&times;</button></div><div class="modal-body"><div class="form-group"><label for="table-number">Table Number</label><input class="form-control" id="table-number" name="table" value="${esc(state.table)}" placeholder="e.g. A1 / VIP 2 / Takeaway" required></div><div class="form-group"><label for="payment-method">Payment Method</label><select class="form-control" id="payment-method" name="method" required><option value="">-- Select Method --</option><option value="cash">Cash</option><option value="credit_card">Credit Card</option><option value="qris">QRIS</option></select></div><div class="form-group"><label>Subtotal</label><input class="form-control" id="modal-subtotal" readonly></div><div class="form-group"><label for="payment-discount">Discount (%)</label><input class="form-control" id="payment-discount" name="discount" inputmode="numeric" placeholder="0" value="0"><small class="form-text text-muted">Example: enter 10 for 10% discount.</small></div><div class="form-group"><label>Grand Total</label><input class="form-control" id="modal-total" readonly></div><div class="form-group"><label for="customer-pay">Customer Pay</label><input class="form-control" id="customer-pay" name="paid" inputmode="numeric" required><div class="btn-group btn-group-sm mt-2"><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="50000">50,000</button><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="100000">100,000</button><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="500000">500,000</button></div></div><div class="form-group"><label>Change</label><input class="form-control" id="change-amount" readonly></div></div><div class="modal-footer justify-content-between"><button class="btn btn-secondary" type="button" data-close>Cancel</button><button class="btn btn-primary">Print Invoice</button></div></form></div></div>`;
+  return `<div class="modal-backdrop-mobile" id="payModal"><div class="modal-dialog"><form class="modal-content" id="pay-form"><div class="modal-header bg-primary text-white"><h5 class="modal-title">Payment</h5><button class="close text-white" type="button" data-close>&times;</button></div><div class="modal-body"><div class="form-group"><label for="table-number">Table Number</label><input class="form-control" id="table-number" name="table" value="${esc(state.table)}" placeholder="e.g. A1 / VIP 2 / Takeaway" required></div><div class="form-group"><label for="payment-method">Payment Method</label><select class="form-control" id="payment-method" name="method" required><option value="">-- Select Method --</option><option value="cash">Cash</option><option value="credit_card">Credit Card</option><option value="qris">QRIS</option></select></div><div class="form-group"><label>Subtotal</label><input class="form-control" id="modal-subtotal" readonly></div><div class="form-group"><label for="payment-discount">Discount (%)</label><input class="form-control" id="payment-discount" name="discount" inputmode="numeric" placeholder="0" value="0"><small class="form-text text-muted">Example: enter 10 for 10% discount.</small></div><div class="form-group"><label>Grand Total</label><input class="form-control" id="modal-total" readonly></div><div class="form-group"><label for="customer-pay">Customer Pay</label><input class="form-control" id="customer-pay" name="paid" inputmode="numeric" required><div class="btn-group btn-group-sm mt-2"><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="50000">50.000</button><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="100000">100.000</button><button type="button" class="btn btn-outline-primary quick-pay" data-quick-pay="500000">500.000</button></div></div><div class="form-group"><label>Change</label><input class="form-control" id="change-amount" readonly></div></div><div class="modal-footer justify-content-between"><button class="btn btn-secondary" type="button" data-close>Cancel</button><button class="btn btn-primary">Print Invoice</button></div></form></div></div>`;
 }
 function updatePaymentSummary() {
   const subtotal = total();
@@ -492,7 +716,7 @@ function updatePaymentSummary() {
   const paidInput = document.querySelector("#customer-pay");
   const percent = Math.min(100, Math.max(0, Number(discountInput?.value || 0)));
   const grandTotal = subtotal - Math.floor((subtotal * percent) / 100);
-  if (method === "qris" || method === "credit_card") paidInput.value = grandTotal;
+  if (method === "qris" || method === "credit_card") paidInput.value = formatDigits(grandTotal);
   const paid = Number(String(paidInput?.value || 0).replace(/\D/g, ""));
   document.querySelector("#modal-subtotal").value = money(subtotal);
   document.querySelector("#modal-total").value = money(grandTotal);
@@ -529,6 +753,7 @@ function modalView() {
 }
 function render() {
   setTheme();
+  setBodyLayout();
   if (!state.session) {
     app.innerHTML = loginView();
     return;
@@ -647,8 +872,9 @@ function addOrUpdate(line) {
   state.editing = null;
   render();
 }
-function saveOrder(data, openBill = false) {
+async function saveOrder(data, openBill = false) {
   if (!state.cart.length) return notice("Keranjang masih kosong.", "warning");
+  if (state.activeBill?.viewOnly) return notice("History transaksi paid hanya bisa dilihat.", "warning");
   state.table = data.table.trim();
   const discountPercent = Math.min(
     100,
@@ -663,30 +889,66 @@ function saveOrder(data, openBill = false) {
   if (!state.table) return notice("Nomor meja wajib diisi.", "warning");
   if (!openBill && data.method === "cash" && paid < grandTotal)
     return notice("Uang bayar kurang.", "warning");
-  const order = {
-    id: crypto.randomUUID(),
-    status: openBill ? "OPEN BILL" : "PAID",
-    table: state.table,
-    method: openBill ? "Open Bill" : data.method,
-    subtotal: total(),
+  const activeBill = state.activeBill;
+  const localOpenBill = activeBill ? findLocalOrder(activeBill) : null;
+  const existingOpenBill = localOpenBill || (activeBill ? reportingOrders().find((order) => sameOrderIdentity(order, activeBill)) : null);
+  const order = existingOpenBill
+    ? {
+      ...existingOpenBill,
+      status: openBill ? "OPEN BILL" : "PAID",
+      table: state.table,
+      method: openBill ? "Open Bill" : data.method,
+      subtotal: total(),
+      discount,
+      discountPercent,
+      total: openBill ? total() : grandTotal,
+      paid: openBill ? 0 : paid,
+      change: openBill ? 0 : Math.max(0, paid - grandTotal),
+      items: cloneOrderItems(state.cart),
+      synced: false,
+      updatedAt: new Date().toISOString(),
+      ...(openBill ? {} : { settledAt: new Date().toISOString() }),
+    }
+    : {
+      id: crypto.randomUUID(),
+      status: openBill ? "OPEN BILL" : "PAID",
+      table: state.table,
+      method: openBill ? "Open Bill" : data.method,
+      subtotal: total(),
     discount,
     discountPercent,
     total: openBill ? total() : grandTotal,
     paid: openBill ? 0 : paid,
-    change: openBill ? 0 : Math.max(0, paid - grandTotal),
-    createdAt: new Date().toISOString(),
-    created: new Date().toLocaleString("id-ID"),
-    items: state.cart,
-    synced: false,
-  };
-  state.orders.unshift(order);
+      change: openBill ? 0 : Math.max(0, paid - grandTotal),
+      createdAt: new Date().toISOString(),
+      created: new Date().toLocaleString("id-ID"),
+      items: cloneOrderItems(state.cart),
+      synced: false,
+    };
+  if (!openBill && existingOpenBill?.serverOrderId && state.session?.token) {
+    if (!navigator.onLine) throw new Error("Open bill dari server perlu koneksi internet untuk mengubah status menjadi paid.");
+    await api("order-settle", state.session.token, {
+      method: "POST",
+      body: JSON.stringify({
+        id: existingOpenBill.serverOrderId,
+        method: data.method,
+        paid,
+      }),
+    });
+  }
+  if (localOpenBill) Object.assign(localOpenBill, order);
+  else if (existingOpenBill && openBill) state.orders.unshift(order);
+  else if (!existingOpenBill) state.orders.unshift(order);
   state.cart = [];
+  state.activeBill = null;
   state.modal = null;
   persist();
   render();
   notice(
     openBill
       ? "Open bill tersimpan di perangkat."
+      : existingOpenBill
+        ? "Open bill berhasil dibayar."
       : "Transaksi tersimpan di perangkat.",
     "success",
   );
@@ -775,7 +1037,7 @@ async function sync(silent = false) {
 }
 
 app.addEventListener("click", async (event) => {
-  const target = event.target.closest("button, tr, a");
+  const target = event.target.closest("button, tr, a, [data-action]");
   if (!target) return;
   if (target.dataset.reportAction) { event.preventDefault(); await reports.click(target); return; }
   if (reports.isBusy()) return;
@@ -783,13 +1045,26 @@ app.addEventListener("click", async (event) => {
   if (target.dataset.page) {
     state.page = target.dataset.page;
     state.sidebarOpen = false;
+    state.historyDrawerOpen = false;
     render();
     return;
   }
-  if (target.dataset.product) return openProduct(target.dataset.product);
+  if (target.dataset.product) {
+    if (!canEditCart()) {
+      notice("History transaksi paid hanya bisa dilihat.", "warning");
+      return;
+    }
+    return openProduct(target.dataset.product);
+  }
   if (target.dataset.category) {
     state.category = target.dataset.category;
-    render();
+    updateCategoryTabs();
+    updateProductList();
+    return;
+  }
+  if (target.dataset.historyIndex !== undefined) {
+    const order = todayHistoryOrders()[Number(target.dataset.historyIndex)];
+    if (order) loadOrderToSummary(order);
     return;
   }
   if (target.dataset.reportDate) {
@@ -799,6 +1074,10 @@ app.addEventListener("click", async (event) => {
     return;
   }
   if (target.dataset.edit !== undefined) {
+    if (!canEditSummaryItems()) {
+      notice("Transaksi cancel hanya bisa dilihat.", "warning");
+      return;
+    }
     state.editing = Number(target.dataset.edit);
     state.selected = state.cart[state.editing];
     state.modal = state.selected.cartType === "carwash" ? "carwash" : "item";
@@ -839,6 +1118,12 @@ app.addEventListener("click", async (event) => {
   if (action === "sidebar") {
     state.sidebarOpen = !state.sidebarOpen;
     render();
+  } else if (action === "toggle-history") {
+    state.historyDrawerOpen = !state.historyDrawerOpen;
+    render();
+  } else if (action === "close-history") {
+    state.historyDrawerOpen = false;
+    render();
   } else if (action === "theme") {
     state.theme = state.theme === "dark" ? "light" : "dark";
     render();
@@ -873,13 +1158,35 @@ app.addEventListener("click", async (event) => {
     render();
     notice("Profil pengguna belum tersedia di APK ini.", "info");
   } else if (action === "sync") void sync();
+  else if (action === "cancel-transaction") await cancelSummaryOrder();
+  else if (action === "print-chit" || action === "print-invoice-cashier") {
+    if (!state.cart.length) {
+      notice("Tambahkan produk terlebih dahulu.", "warning");
+      return;
+    }
+    const order = currentCartOrder();
+    if (action === "print-chit") {
+      await printReceipt(order, "kitchen", "kitchen");
+      await wait(2500);
+      await printReceipt(order, "cashier", "kitchen");
+    }
+    else await printReceipt(order, "cashier", "invoice");
+  }
   else if (action === "clear") {
-    if (confirm("Hapus transaksi ini?")) {
+    if (await sweetConfirm({
+      title: "Hapus list transaksi dari Order Summary?",
+      confirmButtonText: "Hapus",
+    })) {
       state.cart = [];
+      state.activeBill = null;
       persist();
       render();
     }
   } else if (action === "pay") {
+    if (!canEditCart()) {
+      notice("History transaksi paid hanya bisa dilihat.", "warning");
+      return;
+    }
     if (!state.cart.length)
       notice("Tambahkan produk terlebih dahulu.", "warning");
     else {
@@ -887,6 +1194,10 @@ app.addEventListener("click", async (event) => {
       render();
     }
   } else if (action === "bill") {
+    if (!canEditCart()) {
+      notice("History transaksi paid hanya bisa dilihat.", "warning");
+      return;
+    }
     if (!state.cart.length)
       notice("Tambahkan produk terlebih dahulu.", "warning");
     else {
@@ -906,6 +1217,7 @@ app.addEventListener("click", async (event) => {
   } else if (action === "logout") {
     state.session = null;
     state.cart = [];
+    state.activeBill = null;
     persist();
     render();
   } else if (action === "reset-report") {
@@ -917,8 +1229,7 @@ app.addEventListener("input", (event) => {
   reports.input(event.target);
   if (event.target.id === "product-search") {
     state.search = event.target.value;
-    render();
-    document.querySelector("#product-search")?.focus();
+    updateProductList();
   } else if (event.target.id === "sidebar-search") {
     const keyword = event.target.value.trim().toLowerCase();
     document.querySelectorAll("[data-sidebar-nav]").forEach((item) => {
@@ -988,8 +1299,8 @@ app.addEventListener("submit", async (event) => {
           ? `Vacuum: ${vacuum === "yes" ? "Ya" : "Tidak"}`
           : `NoPol: ${data.nopol}, Service: ${data.service}, Ukuran: ${data.ukuran}, Vacuum: ${vacuum === "yes" ? "Ya" : "Tidak"}`,
       });
-    } else if (form.id === "pay-form") saveOrder(data);
-    else if (form.id === "bill-form") saveOrder(data, true);
+    } else if (form.id === "pay-form") await saveOrder(data);
+    else if (form.id === "bill-form") await saveOrder(data, true);
   } catch (error) {
     notice(error.message || "Proses gagal.", "danger");
   }
@@ -1005,14 +1316,18 @@ document.addEventListener(
         ?.setAttribute("data-hold", "true");
     const quickPay = event.target.closest("[data-quick-pay]");
     if (quickPay) {
-      document.querySelector("#customer-pay").value = quickPay.dataset.quickPay;
+      document.querySelector("#customer-pay").value = formatDigits(quickPay.dataset.quickPay);
       updatePaymentSummary();
     }
   },
   true,
 );
 document.addEventListener("input", (event) => {
-  if (["payment-discount", "customer-pay"].includes(event.target.id))
+  if (event.target.id === "customer-pay") {
+    event.target.value = formatDigits(event.target.value);
+    event.target.setSelectionRange?.(event.target.value.length, event.target.value.length);
+    updatePaymentSummary();
+  } else if (event.target.id === "payment-discount")
     updatePaymentSummary();
 });
 document.addEventListener("change", (event) => {

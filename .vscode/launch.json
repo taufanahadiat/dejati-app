@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Android: Run and Debug Emulator + scrcpy",
+      "name": "Android: Run and Debug Emulator Window",
       "type": "pwa-chrome",
       "request": "attach",
       "address": "localhost",
@@ -12,30 +12,20 @@
       "sourceMapPathOverrides": {
         "../src/*": "${workspaceFolder}/src/*"
       },
-      "preLaunchTask": "Android: prepare emulator debug + scrcpy"
+      "preLaunchTask": "Android: prepare emulator debug"
     },
     {
-      "name": "Android: install + scrcpy (all)",
+      "name": "Android: install emulator window only",
       "type": "node-terminal",
       "request": "launch",
       "env": {
         "NODE_OPTIONS": "",
         "VSCODE_INSPECTOR_OPTIONS": ""
       },
-      "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\vscode-android-run.ps1\" -Target all"
+      "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\vscode-android-run.ps1\" -Target emulator -StartEmulator -NoScrcpy"
     },
     {
-      "name": "Android: install + scrcpy (emulator)",
-      "type": "node-terminal",
-      "request": "launch",
-      "env": {
-        "NODE_OPTIONS": "",
-        "VSCODE_INSPECTOR_OPTIONS": ""
-      },
-      "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}\\scripts\\vscode-android-run.ps1\" -Target emulator"
-    },
-    {
-      "name": "Android: install + scrcpy (device)",
+      "name": "Android: install hardware device + scrcpy",
       "type": "node-terminal",
       "request": "launch",
       "env": {

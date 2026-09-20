@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Android: prepare emulator debug + scrcpy",
+      "label": "Android: prepare emulator debug",
       "type": "process",
       "command": "powershell",
       "args": [
@@ -12,7 +12,8 @@
         "-File",
         "${workspaceFolder}\\.vscode\\android-debug.ps1",
         "-Action",
-        "RunAndPrepareDebug"
+        "RunAndPrepareDebug",
+        "-NoScrcpy"
       ],
       "options": {
         "env": {
@@ -23,7 +24,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Android: install + scrcpy (all)",
+      "label": "Android: install emulator window only",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -32,7 +33,9 @@
         "-File",
         "${workspaceFolder}\\scripts\\vscode-android-run.ps1",
         "-Target",
-        "all"
+        "emulator",
+        "-StartEmulator",
+        "-NoScrcpy"
       ],
       "group": {
         "kind": "build",
@@ -41,22 +44,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Android: install + scrcpy (emulator)",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}\\scripts\\vscode-android-run.ps1",
-        "-Target",
-        "emulator"
-      ],
-      "group": "build",
-      "problemMatcher": []
-    },
-    {
-      "label": "Android: install + scrcpy (device)",
+      "label": "Android: install hardware device + scrcpy",
       "type": "shell",
       "command": "powershell",
       "args": [

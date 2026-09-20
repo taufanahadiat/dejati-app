@@ -14,6 +14,15 @@ test("uploaded orders count once, including retries after a lost response", () =
   assert.equal(mergeReportOrders(server, [{ id: "legacy", serverOrderId: 1 }]).length, 1);
 });
 
+test("local edits override the matching server order", () => {
+  const server = [{ serverOrderId: 1, clientOrderId: "bill-1", total: 25000, items: [{ name: "A" }] }];
+  const local = [{ id: "bill-1", serverOrderId: 1, total: 40000, items: [{ name: "A" }, { name: "B" }] }];
+  const merged = mergeReportOrders(server, local);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].total, 40000);
+  assert.equal(merged[0].items.length, 2);
+});
+
 test("offline and pre-migration data remain available", () => {
   const local = [{ id: "pending", total: 10000 }];
   assert.deepEqual(mergeReportOrders(null, local), local);

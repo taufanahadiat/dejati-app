@@ -1,7 +1,7 @@
 import { exportReport } from "./reportExport.js";
 import { closingRecords, dateRange, jakartaDate, orderStatus, validateExpenses } from "./reportModel.js";
 
-export function createReports({ state, orders, api, render, persist, notice, refresh, printReceipt, connectCashier, printText, money, esc }) {
+export function createReports({ state, orders, api, render, persist, notice, refresh, printReceipt, connectCashier, printText, loadOpenBill, money, esc }) {
   const ui = { ...dateRange("today"), preset: "today", month: "", year: "", search: "", page: 0, size: 25, modal: null, selected: null, preview: null, busy: false, expenses: [], reason: "", method: "cash", paid: "", pending: null, printedClosing: null };
   const pendingKey = () => `dejati-closing-request-${state.session?.user?.id || state.session?.user?.name}`;
   const readPending = () => { try { return JSON.parse(localStorage.getItem(pendingKey())); } catch { return null; } };
@@ -11,6 +11,7 @@ export function createReports({ state, orders, api, render, persist, notice, ref
   const btn = (action, label, color="secondary", id="") => `<button type="button" class="btn btn-sm btn-${color} mr-1 mb-1" data-report-action="${action}" ${id?`data-order-id="${esc(id)}"`:""} ${ui.busy?"disabled":""}>${label}</button>`;
   const table = (heads, rows, empty) => `<div class="table-responsive"><table class="table table-bordered table-striped table-hover"><thead class="thead-dark"><tr>${heads.map(h=>`<th>${h}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${heads.length}" class="text-center text-muted py-4">${empty}</td></tr>`}</tbody></table></div>`;
   const wrap = (title, content) => `<section class="content pt-3"><div class="container-fluid"><div class="card card-outline card-dark"><div class="card-header"><h4 class="mb-0">${title}</h4></div><div class="card-body">${content}</div></div></div></section>`;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const cached = () => `<small class="text-muted d-block mb-3">${state.serverHistory?.synced_at?`Terakhir diperbarui: ${esc(new Date(state.serverHistory.synced_at).toLocaleString("id-ID"))}`:"Data server belum tersinkronisasi."} ${navigator.onLine?"":"• Offline — menampilkan data tersimpan."}</small>`;
   const totals = (sales, expenses) => `<div class="row mb-3">${[["Total Penjualan",sales,"info"],["Total Pengeluaran",expenses,"danger"],["Saldo Bersih",sales-expenses,"success"]].map(([label,value,color])=>`<div class="col-md-4"><div class="small-box bg-${color}"><div class="inner"><h4>${money(value)}</h4><p>${label}</p></div></div></div>`).join("")}</div>`;
   const expenseTable = (expenses) => table(["Keterangan","Nominal"],expenses.map(e=>`<tr><td>${esc(e.keterangan)}</td><td>${money(e.total)}</td></tr>`).join(""),"Tidak ada pengeluaran.");
@@ -103,7 +104,17 @@ export function createReports({ state, orders, api, render, persist, notice, ref
     const id=target.dataset.orderId;
     if (["detail","invoice","chit","settle","cancel"].includes(action)) {
       ui.selected=orders().find(o=>o.id===id); if (!ui.selected) return true;
-      if (action==="invoice" || action==="chit") { await printReceipt(ui.selected,"cashier",action==="chit"?"kitchen":"invoice"); return true; }
+      if (action==="invoice") { await printReceipt(ui.selected,"cashier","invoice"); return true; }
+      if (action==="chit") {
+        await printReceipt(ui.selected,"cashier","kitchen");
+        await wait(2500);
+        await printReceipt(ui.selected,"kitchen","kitchen");
+        return true;
+      }
+      if (action==="detail" && orderStatus(ui.selected)==="OPEN BILL" && loadOpenBill) {
+        ui.modal=null; state.modal=null;
+        return loadOpenBill(ui.selected);
+      }
       ui.reason=""; ui.method="cash"; ui.paid=String(ui.selected.total); ui.modal=action; state.modal="reports";
     } else if (action==="closing-detail") {
       ui.selected=state.serverHistory?.closings?.find(c=>String(c.id)===id); if (!ui.selected) return true;

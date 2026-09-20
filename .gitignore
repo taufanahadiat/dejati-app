@@ -17,6 +17,7 @@ dist-ssr
 !.vscode/extensions.json
 !.vscode/tasks.json
 !.vscode/launch.json
+!.vscode/android-debug.ps1
 .idea
 .DS_Store
 *.suo
