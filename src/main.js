@@ -52,7 +52,7 @@ const reports = createReports({
   money, esc, printReceipt,
   refresh: async () => {
     if (state.syncing) throw new Error("Sinkronisasi sedang berjalan. Coba kembali sebentar lagi.");
-    await sync(true);
+    await sync(true, true);
     const history = await api("report-history", state.session.token);
     state.serverHistory = history;
     persist();
@@ -957,8 +957,8 @@ async function saveOrder(data, openBill = false) {
     void sync(true);
   }
 }
-async function sync(silent = false) {
-  if (!state.session?.token || state.syncing || (silent && state.modal)) return;
+async function sync(silent = false, force = false) {
+  if (!state.session?.token || state.syncing || (silent && state.modal && !force)) return;
   state.syncing = true;
   render();
   try {
@@ -985,6 +985,7 @@ async function sync(silent = false) {
         method: "POST",
         body: JSON.stringify({
           client_order_id: order.id,
+          created_at: order.createdAt,
           table_number: order.table,
           payment_method: order.method,
           status: order.method === "Open Bill" ? "open_bill" : "paid",
@@ -1007,6 +1008,7 @@ async function sync(silent = false) {
       persist();
       } catch (error) { uploadError = error; break; }
     }
+    if (!uploadError && !state.orders.some(item => !item.synced && orderStatus(item) === "PAID")) await reports.syncClosings();
     const history = await api("report-history", state.session.token);
     if (!Array.isArray(history.orders)) throw new Error("Data report server tidak valid.");
     state.serverHistory = history;

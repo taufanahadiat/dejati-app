@@ -13,17 +13,18 @@ function reportPaidSql(): string {
     return "UPPER(COALESCE(NULLIF(o.status_order, ''), CASE WHEN o.paid_amount = 0 THEN 'OPEN BILL' ELSE 'PAID' END)) = 'PAID'";
 }
 
-function reportClosing(mysqli $conn): array {
+function reportClosing(mysqli $conn, ?string $date = null): array {
+    $date ??= date('Y-m-d');
     $paid = reportPaidSql();
-    $row = $conn->query("SELECT CURDATE() tanggal, COALESCE(SUM(o.total_amount),0) total_penjualan,
+    $row = reportQuery($conn,"SELECT ? tanggal, COALESCE(SUM(o.total_amount),0) total_penjualan,
         COALESCE(SUM(IF(o.payment_method='cash',o.total_amount,0)),0) cash,
         COALESCE(SUM(IF(o.payment_method='qris',o.total_amount,0)),0) qris,
         COALESCE(SUM(IF(o.payment_method='credit_card',o.total_amount,0)),0) card
-        FROM orders o WHERE DATE(o.created_at)=CURDATE() AND $paid")->fetch_assoc();
+        FROM orders o WHERE DATE(o.created_at)=? AND $paid",'ss',[$date,$date])->get_result()->fetch_assoc();
     foreach (['cafe'=>'order_items','carwash'=>'order_carwash'] as $key=>$table) {
-        $row[$key] = (int)$conn->query("SELECT COALESCE(SUM(i.total),0) total FROM $table i JOIN orders o ON o.id=i.id_tr WHERE DATE(o.created_at)=CURDATE() AND $paid")->fetch_assoc()['total'];
+        $row[$key] = (int)reportQuery($conn,"SELECT COALESCE(SUM(i.total),0) total FROM $table i JOIN orders o ON o.id=i.id_tr WHERE DATE(o.created_at)=? AND $paid",'s',[$date])->get_result()->fetch_assoc()['total'];
     }
-    $row['expenses'] = $conn->query('SELECT keterangan,total,created_at FROM pengeluaran WHERE DATE(created_at)=CURDATE() ORDER BY id')->fetch_all(MYSQLI_ASSOC);
+    $row['expenses'] = reportQuery($conn,'SELECT keterangan,total,created_at FROM pengeluaran WHERE DATE(created_at)=? ORDER BY id','s',[$date])->get_result()->fetch_all(MYSQLI_ASSOC);
     return reportNormalizeClosing($row);
 }
 
@@ -103,9 +104,10 @@ function reportSaveClosing(mysqli $conn, array $input, int $userId): array {
             $conn->commit();
             return json_decode($existing['response_json'],true,512,JSON_THROW_ON_ERROR);
         }
-        if (($input['date'] ?? '')!==date('Y-m-d')) throw new InvalidArgumentException('Tanggal sudah berubah. Muat ulang preview closing hari ini.');
-        foreach ($expenses as $row) reportQuery($conn,'INSERT INTO pengeluaran (keterangan,total,created_at) VALUES (?,?,NOW())','si',[$row['keterangan'],$row['total']]);
-        $closing = reportClosing($conn);
+        $date = (string)($input['date'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/',$date) || !checkdate((int)substr($date,5,2),(int)substr($date,8,2),(int)substr($date,0,4)) || $date > date('Y-m-d')) throw new InvalidArgumentException('Tanggal closing tidak valid.');
+        foreach ($expenses as $row) reportQuery($conn,'INSERT INTO pengeluaran (keterangan,total,created_at) VALUES (?,?,?)','sis',[$row['keterangan'],$row['total'],$date.' 23:59:59']);
+        $closing = reportClosing($conn,$date);
         reportQuery($conn,'INSERT INTO tb_closingan (tanggal,total_penjualan,cash,qris,card,cafe,carwash,detail_pengeluaran,created_at) VALUES (?,?,?,?,?,?,?,?,NOW()) ON DUPLICATE KEY UPDATE total_penjualan=VALUES(total_penjualan),cash=VALUES(cash),qris=VALUES(qris),card=VALUES(card),cafe=VALUES(cafe),carwash=VALUES(carwash),detail_pengeluaran=VALUES(detail_pengeluaran),created_at=NOW()',
             'siiiiiis',[$closing['tanggal'],$closing['total_penjualan'],$closing['cash'],$closing['qris'],$closing['card'],$closing['cafe'],$closing['carwash'],json_encode($closing['expenses'],JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
         $result = ['closing'=>$closing,'saved'=>true];

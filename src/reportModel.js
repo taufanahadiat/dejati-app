@@ -44,3 +44,13 @@ export function validateExpenses(rows) {
     return { keterangan, total };
   });
 }
+
+export function localClosing(orders, date, expenses = []) {
+  const paid = orders.filter(o => jakartaDate(o.createdAt) === date && orderStatus(o) === "PAID");
+  const sum = rows => rows.reduce((total, row) => total + Number(row.total || 0), 0);
+  const amount = method => sum(paid.filter(o => o.method === method));
+  const category = type => paid.reduce((total, order) => total + (order.items || []).filter(item => (item.cartType || "product") === type).reduce((n, item) => n + Number(item.lineTotal ?? item.price * item.qty), 0), 0);
+  const total_penjualan = sum(paid);
+  const total_expenses = sum(expenses);
+  return { tanggal: date, total_penjualan, cash: amount("cash"), qris: amount("qris"), card: amount("credit_card"), cafe: category("product"), carwash: category("carwash"), expenses, total_expenses, net: total_penjualan - total_expenses };
+}

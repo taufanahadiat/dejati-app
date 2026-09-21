@@ -1,11 +1,21 @@
 import { exportReport } from "./reportExport.js";
-import { closingRecords, dateRange, jakartaDate, orderStatus, validateExpenses } from "./reportModel.js";
+import { closingRecords, dateRange, jakartaDate, localClosing, orderStatus, validateExpenses } from "./reportModel.js";
 
 export function createReports({ state, orders, api, render, persist, notice, refresh, printReceipt, connectCashier, printText, loadOpenBill, money, esc }) {
   const ui = { ...dateRange("today"), preset: "today", month: "", year: "", search: "", page: 0, size: 25, modal: null, selected: null, preview: null, busy: false, expenses: [], reason: "", method: "cash", paid: "", pending: null, printedClosing: null };
   const pendingKey = () => `dejati-closing-request-${state.session?.user?.id || state.session?.user?.name}`;
   const readPending = () => { try { return JSON.parse(localStorage.getItem(pendingKey())); } catch { return null; } };
   const savePending = (value) => { ui.pending = value; if (value) localStorage.setItem(pendingKey(), JSON.stringify(value)); else localStorage.removeItem(pendingKey()); };
+  const queuedKey = () => `dejati-closing-queue-${state.session?.user?.id || state.session?.user?.name}`;
+  const queue = () => { try { return JSON.parse(localStorage.getItem(queuedKey()) || "[]"); } catch { return []; } };
+  const saveQueue = rows => localStorage.setItem(queuedKey(), JSON.stringify(rows));
+  async function syncClosings() {
+    const pending = queue();
+    for (const request of pending) {
+      await post("closing-save", request);
+      saveQueue(queue().filter(row => row.request_id !== request.request_id));
+    }
+  }
   const post = (path, body) => api(path, state.session.token, { method: "POST", body: JSON.stringify(body) });
   const badge = (order) => `<span class="badge badge-${orderStatus(order)==="PAID"?"success":orderStatus(order)==="CANCEL"?"danger":"warning"}">${esc(orderStatus(order))}</span>`;
   const btn = (action, label, color="secondary", id="") => `<button type="button" class="btn btn-sm btn-${color} mr-1 mb-1" data-report-action="${action}" ${id?`data-order-id="${esc(id)}"`:""} ${ui.busy?"disabled":""}>${label}</button>`;
@@ -29,12 +39,12 @@ export function createReports({ state, orders, api, render, persist, notice, ref
     return wrap("History Transaksi",`${cached()}<form id="history-filter" class="row align-items-end mb-3"><div class="col-md-3"><label>Report Range</label><select name="preset" class="form-control">${[["today","Today"],["week","This Week (Mon–Sun)"],["month","This Month"],["custom","Custom"]].map(([v,l])=>`<option value="${v}" ${ui.preset===v?"selected":""}>${l}</option>`).join("")}</select></div><div class="col-md-2"><label>Start Date</label><input name="start" type="date" class="form-control" value="${ui.start}" required></div><div class="col-md-2"><label>End Date</label><input name="end" type="date" class="form-control" value="${ui.end}" required></div><div class="col-md-5 mt-2"><button class="btn btn-primary mr-1">Apply</button>${btn("today","Today")}${btn("preview","Closing Hari Ini","info")}</div></form><small class="text-muted d-block mb-2">Showing transactions from ${ui.start} to ${ui.end}.</small><div class="d-flex flex-wrap justify-content-between mb-2"><div>${btn("csv","CSV")}${btn("excel","Excel")}${btn("pdf","PDF")}${btn("refresh","Refresh","outline-primary")}</div><form id="history-search" class="form-inline"><label class="mr-2">Search:</label><input name="search" class="form-control form-control-sm" value="${esc(ui.search)}"><button class="btn btn-sm btn-secondary ml-1">Cari</button></form></div>${table(["Date","Table","Status","Payment","Total","Paid","Change","Details"],rows,"Belum ada transaksi untuk rentang ini.")}<div class="d-flex justify-content-between align-items-center"><small>${all.length?ui.page*ui.size+1:0}–${Math.min(all.length,(ui.page+1)*ui.size)} dari ${all.length} transaksi</small><div>${btn("prev","Previous")}<span class="mr-2">${ui.page+1} / ${pages}</span>${btn("next","Next")}</div></div>`);
   }
   function closingView() {
-    const all=state.serverHistory?.closings || [];
+    const all=[...queue().map((row,i)=>({...row.closing,id:`local-${i}`,local:true})),...(state.serverHistory?.closings || [])];
     const rows=closingRecords(all,ui.month,ui.year);
     const months=["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
     const years=[...new Set(all.map(r=>r.tanggal.slice(0,4)))].sort().reverse();
     const filter=`<form id="closing-filter" class="form-inline mb-3"><select name="month" class="form-control form-control-sm mr-2" aria-label="Filter bulan"><option value="">Semua Bulan</option>${months.map((name,i)=>{const value=String(i+1).padStart(2,"0");return `<option value="${value}" ${ui.month===value?"selected":""}>${name}</option>`;}).join("")}</select><select name="year" class="form-control form-control-sm mr-2" aria-label="Filter tahun"><option value="">Semua Tahun</option>${years.map(y=>`<option ${ui.year===y?"selected":""}>${y}</option>`).join("")}</select><button class="btn btn-primary btn-sm mr-2">Filter</button>${btn("reset-closing","Reset","outline-secondary")}${btn("refresh","Refresh","outline-primary")}</form>`;
-    return wrap("Closing Harian",`<p class="text-muted">Satu rekap terbaru untuk setiap tanggal closing.</p>${cached()}${filter}${totals(rows.reduce((s,r)=>s+Number(r.total_penjualan),0),rows.reduce((s,r)=>s+Number(r.total_expenses),0))}${table(["Tanggal","Total Penjualan","Cash","QRIS","Kartu","Cafe","Carwash","Pengeluaran","Saldo Bersih","Detail"],rows.map(r=>`<tr><td>${esc(r.tanggal.split("-").reverse().join("-"))}</td>${[r.total_penjualan,r.cash,r.qris,r.card,r.cafe,r.carwash].map(v=>`<td>${money(v)}</td>`).join("")}<td><span class="badge badge-danger">${money(r.total_expenses)}</span></td><td><strong>${money(r.net)}</strong></td><td>${r.expenses?.length?btn("closing-detail","Lihat","info",String(r.id)):"-"}</td></tr>`).join(""),"Belum ada data closing untuk filter ini.")}`);
+    return wrap("Closing Harian",`<p class="text-muted">Satu rekap terbaru untuk setiap tanggal closing.</p>${cached()}${filter}${totals(rows.reduce((s,r)=>s+Number(r.total_penjualan),0),rows.reduce((s,r)=>s+Number(r.total_expenses),0))}${table(["Tanggal","Total Penjualan","Cash","QRIS","Kartu","Cafe","Carwash","Pengeluaran","Saldo Bersih","Detail"],rows.map(r=>`<tr><td>${esc(r.tanggal.split("-").reverse().join("-"))}${r.local?'<small class="d-block text-warning">Menunggu sinkronisasi</small>':""}</td>${[r.total_penjualan,r.cash,r.qris,r.card,r.cafe,r.carwash].map(v=>`<td>${money(v)}</td>`).join("")}<td><span class="badge badge-danger">${money(r.total_expenses)}</span></td><td><strong>${money(r.net)}</strong></td><td>${r.expenses?.length?btn("closing-detail","Lihat","info",String(r.id)):"-"}</td></tr>`).join(""),"Belum ada data closing untuk filter ini.")}`);
   }
   function modal() {
     if (!ui.modal) return "";
@@ -72,27 +82,25 @@ export function createReports({ state, orders, api, render, persist, notice, ref
   }
   function online() { if (!navigator.onLine) throw new Error("Aksi ini memerlukan koneksi server. Data tersimpan tetap bisa dilihat saat offline."); }
   async function preview() {
-    online();
-    await refresh();
-    if (state.orders.some(o=>!o.synced && orderStatus(o)==="PAID")) throw new Error("Masih ada transaksi lunas yang belum tersinkronisasi. Sinkronkan sebelum closing.");
-    ui.preview=(await api("closing-preview",state.session.token)).closing;
-    ui.pending=readPending(); ui.expenses=ui.pending?.expenses || []; ui.printedClosing=null; ui.modal="preview"; state.modal="reports";
+    const date=jakartaDate(new Date());
+    if (navigator.onLine) await refresh().catch(() => undefined);
+    const existing=queue().find(row=>row.date===date);
+    ui.pending=existing || readPending(); ui.expenses=ui.pending?.expenses || [];
+    ui.preview=existing?.closing || localClosing(orders(),date,[]);
+    ui.printedClosing=null; ui.modal="preview"; state.modal="reports";
   }
   function closingText(c) {
     return ['\x1B\x40\x1B\x61\x01',"Dejati Coffee Garden","Laporan Closing Harian",`Tanggal: ${c.tanggal}`,'\x1B\x61\x00',"--------------------------------",...[["Total Penjualan",c.total_penjualan],["Cash",c.cash],["QRIS",c.qris],["Kartu Kredit",c.card],["Cafe",c.cafe],["Carwash",c.carwash]].map(([k,v])=>`${k}: ${money(v)}`),"--------------------------------","Pengeluaran [-]",...(c.expenses.length?c.expenses.map(e=>`${e.keterangan}: ${money(e.total)}`):["Tidak ada pengeluaran"]),"--------------------------------",`Saldo Bersih: ${money(c.net)}`,"Terima kasih!\n\n\n\x1D\x56\x00"].join("\n");
   }
   async function saveClosing() {
-    online();
     const expenses=validateExpenses(ui.expenses);
-    await connectCashier();
-    if (!ui.pending) savePending({ request_id:crypto.randomUUID(),date:ui.preview.tanggal,expenses });
-    let result;
-    try { result=await post("closing-save",ui.pending); }
-    catch(error) { if (error.status===422) savePending(null); throw error; }
-    ui.preview=result.closing; ui.printedClosing=result.closing; ui.expenses=[]; savePending(null);
-    await refresh();
-    try { await printText(closingText(result.closing)); notice("Closing tersimpan dan dikirim ke printer kasir.","success"); }
+    const closing=localClosing(orders(),ui.preview.tanggal,expenses);
+    const request=ui.pending || { request_id:crypto.randomUUID(),date:closing.tanggal,expenses,closing };
+    if (!queue().some(row=>row.request_id===request.request_id)) saveQueue([...queue(),request]);
+    savePending(null); ui.pending=request; ui.preview=closing; ui.printedClosing=closing;
+    try { await connectCashier(); await printText(closingText(closing)); notice("Closing dicetak dan tersimpan lokal. Sinkronisasi otomatis saat server tersedia.","success"); }
     catch(error) { throw new Error(`Closing sudah tersimpan. Cetak gagal: ${error.message}. Gunakan Cetak Ulang.`); }
+    if (navigator.onLine) void refresh().catch(()=>undefined);
   }
   function exportRows() {
     return [["Date","Table","Status","Payment","Total","Paid","Change"],...historyRows().map(o=>[new Date(o.createdAt).toLocaleString("id-ID",{timeZone:"Asia/Jakarta"}),o.table,orderStatus(o),o.method,o.total,o.paid,o.change])];
@@ -117,7 +125,7 @@ export function createReports({ state, orders, api, render, persist, notice, ref
       }
       ui.reason=""; ui.method="cash"; ui.paid=String(ui.selected.total); ui.modal=action; state.modal="reports";
     } else if (action==="closing-detail") {
-      ui.selected=state.serverHistory?.closings?.find(c=>String(c.id)===id); if (!ui.selected) return true;
+      ui.selected=[...queue().map((row,i)=>({...row.closing,id:`local-${i}`})),...(state.serverHistory?.closings || [])].find(c=>String(c.id)===id); if (!ui.selected) return true;
       ui.modal=action; state.modal="reports";
     } else if (action==="close") { ui.modal=null; state.modal=null; }
     else if (action==="preview") { await run(preview); return true; }
@@ -176,5 +184,5 @@ export function createReports({ state, orders, api, render, persist, notice, ref
     }
     if(el.closest("#report-settle")&&el.name==="method") {ui.method=el.value;ui.paid=String(ui.selected.total);render();}
   }
-  return { view:page=>page==="history"?historyView():closingView(),modal,click,submit,input,change,isBusy:()=>ui.busy };
+  return { view:page=>page==="history"?historyView():closingView(),modal,click,submit,input,change,syncClosings,isBusy:()=>ui.busy };
 }
