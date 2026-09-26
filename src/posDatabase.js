@@ -23,8 +23,12 @@ async function database() {
       CREATE TABLE IF NOT EXISTS server_catalog (id TEXT NOT NULL, cart_type TEXT NOT NULL, name TEXT NOT NULL, price INTEGER NOT NULL, category TEXT NOT NULL, image TEXT, synced_at TEXT NOT NULL, PRIMARY KEY (id, cart_type));
       CREATE TABLE IF NOT EXISTS server_catalog_cache (cache_key TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, synced_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS server_transactions (client_order_id TEXT PRIMARY KEY NOT NULL, server_order_id INTEGER, table_number TEXT NOT NULL, payment_method TEXT NOT NULL, total INTEGER NOT NULL, created_at TEXT NOT NULL, synced_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS server_reports (report_date TEXT PRIMARY KEY NOT NULL, total_sales INTEGER NOT NULL, cash INTEGER NOT NULL, qris INTEGER NOT NULL, card INTEGER NOT NULL, synced_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS server_reports (report_date TEXT PRIMARY KEY NOT NULL, total_sales INTEGER NOT NULL, cash INTEGER NOT NULL, qris INTEGER NOT NULL, card INTEGER NOT NULL, detailing INTEGER NOT NULL DEFAULT 0, synced_at TEXT NOT NULL);
     `);
+    const reportColumns = await connection.query("PRAGMA table_info(server_reports);");
+    if (!reportColumns.values?.some((column) => column.name === "detailing")) {
+      await connection.execute("ALTER TABLE server_reports ADD COLUMN detailing INTEGER NOT NULL DEFAULT 0;");
+    }
     return connection;
   })();
   try { return await opening; } finally { opening = null; }
@@ -43,7 +47,7 @@ export async function mirrorServerData(users, products, report, categories = [])
     await db.run("DELETE FROM server_catalog;", [], false);
     for (const product of products) await db.run("INSERT OR REPLACE INTO server_catalog (id, cart_type, name, price, category, image, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?);", [product.id, product.cartType || "product", product.name, product.price, product.category, product.image || null, syncedAt], false);
     await db.run("INSERT OR REPLACE INTO server_catalog_cache (cache_key, payload, synced_at) VALUES (?, ?, ?);", ["catalog", JSON.stringify({ products, categories }), syncedAt], false);
-    await db.run("INSERT OR REPLACE INTO server_reports (report_date, total_sales, cash, qris, card, synced_at) VALUES (?, ?, ?, ?, ?, ?);", [report.date, report.total_sales, report.cash, report.qris, report.card, syncedAt], false);
+    await db.run("INSERT OR REPLACE INTO server_reports (report_date, total_sales, cash, qris, card, detailing, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?);", [report.date, report.total_sales, report.cash, report.qris, report.card, report.detailing || 0, syncedAt], false);
     await db.commitTransaction();
   } catch (error) { await db.rollbackTransaction(); throw error; }
 }

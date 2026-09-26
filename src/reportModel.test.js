@@ -6,16 +6,18 @@ test("local closing includes paid orders on the Jakarta date and expenses", () =
   const orders = [
     { createdAt: "2026-09-20T10:00:00Z", status: "PAID", method: "cash", total: 20000, items: [{ cartType: "product", price: 20000, qty: 1 }] },
     { createdAt: "2026-09-20T12:00:00Z", status: "PAID", method: "qris", total: 15000, items: [{ cartType: "carwash", price: 15000, qty: 1 }] },
+    { createdAt: "2026-09-20T13:00:00Z", status: "PAID", method: "qris", total: 500000, items: [{ cartType: "detailing", price: 500000, qty: 1 }] },
     { createdAt: "2026-09-20T18:00:00Z", status: "PAID", method: "cash", total: 9000 },
     { createdAt: "2026-09-20T10:00:00Z", status: "CANCEL", method: "cash", total: 5000 },
   ];
   const result = localClosing(orders, "2026-09-20", [{ keterangan: "Es", total: 3000 }]);
-  assert.equal(result.total_penjualan, 35000);
+  assert.equal(result.total_penjualan, 535000);
   assert.equal(result.cash, 20000);
-  assert.equal(result.qris, 15000);
+  assert.equal(result.qris, 515000);
   assert.equal(result.cafe, 20000);
   assert.equal(result.carwash, 15000);
-  assert.equal(result.net, 32000);
+  assert.equal(result.detailing, 500000);
+  assert.equal(result.net, 532000);
 });
 
 test("explicit status overrides paid amount, including free paid orders and canceled payments", () => {

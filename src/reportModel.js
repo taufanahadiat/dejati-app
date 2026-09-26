@@ -52,5 +52,5 @@ export function localClosing(orders, date, expenses = []) {
   const category = type => paid.reduce((total, order) => total + (order.items || []).filter(item => (item.cartType || "product") === type).reduce((n, item) => n + Number(item.lineTotal ?? item.price * item.qty), 0), 0);
   const total_penjualan = sum(paid);
   const total_expenses = sum(expenses);
-  return { tanggal: date, total_penjualan, cash: amount("cash"), qris: amount("qris"), card: amount("credit_card"), cafe: category("product"), carwash: category("carwash"), expenses, total_expenses, net: total_penjualan - total_expenses };
+  return { tanggal: date, total_penjualan, cash: amount("cash"), qris: amount("qris"), card: amount("credit_card"), cafe: category("product"), carwash: category("carwash"), detailing: category("detailing"), expenses, total_expenses, net: total_penjualan - total_expenses };
 }

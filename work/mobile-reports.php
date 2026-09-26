@@ -21,7 +21,7 @@ function reportClosing(mysqli $conn, ?string $date = null): array {
         COALESCE(SUM(IF(o.payment_method='qris',o.total_amount,0)),0) qris,
         COALESCE(SUM(IF(o.payment_method='credit_card',o.total_amount,0)),0) card
         FROM orders o WHERE DATE(o.created_at)=? AND $paid",'ss',[$date,$date])->get_result()->fetch_assoc();
-    foreach (['cafe'=>'order_items','carwash'=>'order_carwash'] as $key=>$table) {
+    foreach (['cafe'=>'order_items','carwash'=>'order_carwash','detailing'=>'order_detailing'] as $key=>$table) {
         $row[$key] = (int)reportQuery($conn,"SELECT COALESCE(SUM(i.total),0) total FROM $table i JOIN orders o ON o.id=i.id_tr WHERE DATE(o.created_at)=? AND $paid",'s',[$date])->get_result()->fetch_assoc()['total'];
     }
     $row['expenses'] = reportQuery($conn,'SELECT keterangan,total,created_at FROM pengeluaran WHERE DATE(created_at)=? ORDER BY id','s',[$date])->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -29,7 +29,7 @@ function reportClosing(mysqli $conn, ?string $date = null): array {
 }
 
 function reportNormalizeClosing(array $row): array {
-    foreach (['total_penjualan','cash','qris','card','cafe','carwash'] as $key) $row[$key] = (int)$row[$key];
+    foreach (['total_penjualan','cash','qris','card','cafe','carwash','detailing'] as $key) $row[$key] = (int)($row[$key] ?? 0);
     $row['expenses'] = $row['expenses'] ?? json_decode($row['detail_pengeluaran'] ?? '[]', true);
     if (!is_array($row['expenses'])) $row['expenses'] = [];
     $row['total_expenses'] = array_sum(array_map(fn($r)=>(int)($r['total'] ?? 0), $row['expenses']));
@@ -59,10 +59,10 @@ function reportHistory(mysqli $conn): array {
             'cancelReason'=>$row['cancel_reason'],'canceledAt'=>$row['canceled_at'],
             'createdAt'=>str_replace(' ','T',$row['created_at']).'+07:00','items'=>[],'synced'=>true];
     }
-    $r = $conn->query("SELECT id_tr,id_prod,item_name,item_price price,quantity qty,total,'product' cart_type,'' nopol,'' service,'' ukuran,'no' vacuum FROM order_items UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'carwash',nopol,service,ukuran,vacuum FROM order_carwash");
+    $r = $conn->query("SELECT id_tr,id_prod,item_name,item_price price,quantity qty,total,'product' cart_type,'' nopol,'' service,'' ukuran,'no' vacuum,'' variant_name FROM order_items UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'carwash',nopol,service,ukuran,vacuum,COALESCE(variant_name,'') FROM order_carwash UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'detailing',nopol,service,ukuran,vacuum,COALESCE(variant_name,'') FROM order_detailing");
     while ($row = $r->fetch_assoc()) {
         $id = (int)$row['id_tr'];
-        if (isset($orders[$id])) $orders[$id]['items'][] = ['id'=>(string)$row['id_prod'],'name'=>$row['item_name'],'price'=>(int)$row['price'],'qty'=>(int)$row['qty'],'lineTotal'=>(int)$row['total'],'cartType'=>$row['cart_type'],'nopol'=>$row['nopol'],'service'=>$row['service'],'ukuran'=>$row['ukuran'],'vacuum'=>$row['vacuum']];
+        if (isset($orders[$id])) $orders[$id]['items'][] = ['id'=>(string)$row['id_prod'],'name'=>$row['item_name'],'price'=>(int)$row['price'],'qty'=>(int)$row['qty'],'lineTotal'=>(int)$row['total'],'cartType'=>$row['cart_type'],'nopol'=>$row['nopol'],'service'=>$row['service'],'ukuran'=>$row['ukuran'],'vacuum'=>$row['vacuum'],'variantName'=>$row['variant_name']];
     }
     foreach ($orders as &$order) {
         $order['subtotal'] = array_sum(array_column($order['items'],'lineTotal'));
@@ -108,8 +108,8 @@ function reportSaveClosing(mysqli $conn, array $input, int $userId): array {
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/',$date) || !checkdate((int)substr($date,5,2),(int)substr($date,8,2),(int)substr($date,0,4)) || $date > date('Y-m-d')) throw new InvalidArgumentException('Tanggal closing tidak valid.');
         foreach ($expenses as $row) reportQuery($conn,'INSERT INTO pengeluaran (keterangan,total,created_at) VALUES (?,?,?)','sis',[$row['keterangan'],$row['total'],$date.' 23:59:59']);
         $closing = reportClosing($conn,$date);
-        reportQuery($conn,'INSERT INTO tb_closingan (tanggal,total_penjualan,cash,qris,card,cafe,carwash,detail_pengeluaran,created_at) VALUES (?,?,?,?,?,?,?,?,NOW()) ON DUPLICATE KEY UPDATE total_penjualan=VALUES(total_penjualan),cash=VALUES(cash),qris=VALUES(qris),card=VALUES(card),cafe=VALUES(cafe),carwash=VALUES(carwash),detail_pengeluaran=VALUES(detail_pengeluaran),created_at=NOW()',
-            'siiiiiis',[$closing['tanggal'],$closing['total_penjualan'],$closing['cash'],$closing['qris'],$closing['card'],$closing['cafe'],$closing['carwash'],json_encode($closing['expenses'],JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
+        reportQuery($conn,'INSERT INTO tb_closingan (tanggal,total_penjualan,cash,qris,card,cafe,carwash,detailing,detail_pengeluaran,created_at) VALUES (?,?,?,?,?,?,?,?,?,NOW()) ON DUPLICATE KEY UPDATE total_penjualan=VALUES(total_penjualan),cash=VALUES(cash),qris=VALUES(qris),card=VALUES(card),cafe=VALUES(cafe),carwash=VALUES(carwash),detailing=VALUES(detailing),detail_pengeluaran=VALUES(detail_pengeluaran),created_at=NOW()',
+            'siiiiiiis',[$closing['tanggal'],$closing['total_penjualan'],$closing['cash'],$closing['qris'],$closing['card'],$closing['cafe'],$closing['carwash'],$closing['detailing'],json_encode($closing['expenses'],JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)]);
         $result = ['closing'=>$closing,'saved'=>true];
         reportQuery($conn,'INSERT INTO mobile_report_requests (request_id,user_id,payload_hash,response_json,created_at) VALUES (?,?,?,?,NOW())','siss',[$key,$userId,$hash,json_encode($result,JSON_THROW_ON_ERROR)]);
         $conn->commit();
@@ -159,7 +159,7 @@ if (isset($reportRoutes[$path])) {
         elseif ($path==='daily-reports') $result=['records'=>reportSnapshots($conn)];
         else {
             $closing=reportClosing($conn);
-            $result=$path==='closing-preview' ? ['closing'=>$closing] : ['date'=>$closing['tanggal'],'total_sales'=>$closing['total_penjualan'],'cash'=>$closing['cash'],'qris'=>$closing['qris'],'card'=>$closing['card']];
+            $result=$path==='closing-preview' ? ['closing'=>$closing] : ['date'=>$closing['tanggal'],'total_sales'=>$closing['total_penjualan'],'cash'=>$closing['cash'],'qris'=>$closing['qris'],'card'=>$closing['card'],'cafe'=>$closing['cafe'],'carwash'=>$closing['carwash'],'detailing'=>$closing['detailing']];
         }
         $conn->commit();
         reply($result);
