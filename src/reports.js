@@ -52,7 +52,7 @@ export function createReports({ state, orders, api, render, persist, notice, ref
     const o=ui.selected;
     if (ui.modal==="detail") {
       title=`Detail Transaksi — ${o.table}`;
-      body=`<p>${badge(o)} • ${esc(new Date(o.createdAt).toLocaleString("id-ID"))}</p>${table(["Item","Qty","Harga","Total"],o.items.map(i=>`<tr><td>${esc(i.name)}${i.nopol?`<small class="d-block">${esc(i.nopol)} ${esc(i.service || "")}</small>`:""}${i.notes?`<small class="d-block">${esc(i.notes)}</small>`:""}</td><td>${i.qty}</td><td>${money(i.price)}</td><td>${money(i.lineTotal ?? i.price*i.qty)}</td></tr>`).join(""),"Tidak ada item.")}<p>Total: <strong>${money(o.total)}</strong> • Bayar: ${money(o.paid)} • Kembali: ${money(o.change)}</p>${o.cancelReason?`<p>Alasan cancel: ${esc(o.cancelReason)}</p>`:""}`;
+      body=`<p>${badge(o)} • ${esc(new Date(o.createdAt).toLocaleString("id-ID"))}</p>${table(["Item","Qty","Harga","Total"],o.items.map(i=>`<tr><td>${esc(i.name)}${i.orderType?`<small class="d-block text-info">${i.orderType==="take-away"?"Take Away":"Dine In"}</small>`:""}${i.nopol?`<small class="d-block">${esc(i.nopol)} ${esc(i.service || "")}</small>`:""}${i.notes?`<small class="d-block">${esc(i.notes)}</small>`:""}</td><td>${i.qty}</td><td>${money(i.price)}</td><td>${money(i.lineTotal ?? i.price*i.qty)}</td></tr>`).join(""),"Tidak ada item.")}<p>Total: <strong>${money(o.total)}</strong> • Bayar: ${money(o.paid)} • Kembali: ${money(o.change)}</p>${o.cancelReason?`<p>Alasan cancel: ${esc(o.cancelReason)}</p>`:""}`;
     } else if (ui.modal==="closing-detail") {
       title=`Detail Pengeluaran (${o.tanggal})`; body=expenseTable(o.expenses);
     } else if (ui.modal==="cancel") {

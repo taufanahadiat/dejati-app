@@ -8,6 +8,7 @@ header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') exit;
 
 require_once __DIR__ . '/../../config/config.php';
+require_once __DIR__ . '/../../config/order_type.php';
 date_default_timezone_set('Asia/Jakarta');
 
 mysqli_query($conn, 'CREATE TABLE IF NOT EXISTS mobile_api_tokens (token_hash CHAR(64) PRIMARY KEY, user_id INT NOT NULL, expires_at DATETIME NOT NULL, created_at DATETIME NOT NULL)');
@@ -58,11 +59,17 @@ if ($path === 'orders' && $_SERVER['REQUEST_METHOD'] === 'POST') {
   if ($timestamp === false || $timestamp > time() + 300) reply(['message' => 'Waktu transaksi tidak valid'], 422);
   $stmt = mysqli_prepare($conn, 'SELECT order_id FROM mobile_sync_orders WHERE client_order_id=?'); mysqli_stmt_bind_param($stmt, 's', $clientId); mysqli_stmt_execute($stmt); $exists = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt)); if ($exists) reply(['order_id' => (int)$exists['order_id'], 'duplicate' => true]);
   $total = 0; foreach ($items as $item) { $type = (string)($item['cartType'] ?? 'product'); $price = in_array($type, ['carwash','detailing'], true) ? money($item['finalPrice'] ?? $item['unitPrice'] ?? 0) : money($item['unitPrice'] ?? 0); $total += $price * max(1, (int)($item['qty'] ?? 1)); } if ($total < 1) reply(['message' => 'Total transaksi tidak valid'], 422);
+  try {
+    foreach ($items as &$item) {
+      if (!in_array($item['cartType'] ?? 'product', ['carwash', 'detailing'], true)) $item['orderType'] = transactionItemOrderType($item);
+    }
+    unset($item);
+  } catch (InvalidArgumentException $e) { reply(['message' => $e->getMessage()], 422); }
   mysqli_begin_transaction($conn); try {
     $status = 'PAID'; $paid = $total; $change = 0;
     $createdAt = (new DateTimeImmutable('@'.$timestamp))->setTimezone(new DateTimeZone('Asia/Jakarta'))->format('Y-m-d H:i:s');
     $stmt = mysqli_prepare($conn, 'INSERT INTO orders (table_number,payment_method,total_amount,paid_amount,change_amount,status_order,created_at) VALUES (?,?,?,?,?,?,?)'); mysqli_stmt_bind_param($stmt, 'ssiiiss', $table, $method, $total, $paid, $change, $status, $createdAt); mysqli_stmt_execute($stmt); $orderId = mysqli_insert_id($conn);
-    foreach ($items as $item) { $id = (string)($item['id'] ?? ''); $name = (string)($item['name'] ?? ''); $qty = max(1, (int)($item['qty'] ?? 1)); $type = (string)($item['cartType'] ?? 'product'); $price = in_array($type, ['carwash','detailing'], true) ? money($item['finalPrice'] ?? $item['unitPrice'] ?? 0) : money($item['unitPrice'] ?? 0); $line=$price*$qty; if (in_array($type, ['carwash','detailing'], true)) { $serviceTable = $type === 'detailing' ? 'order_detailing' : 'order_carwash'; $nopol=trim((string)($item['nopol'] ?? '')); $service=trim((string)($item['service'] ?? '')); $ukuran=trim((string)($item['ukuran'] ?? '')); $vacuum=strtolower((string)($item['vacuum'] ?? 'no')) === 'yes' ? 'yes' : 'no'; $variantName=trim((string)($item['variantName'] ?? '')); $staff=(int)round($line*.3); $management=$line-$staff; $stmt = mysqli_prepare($conn, "INSERT INTO `$serviceTable` (id_tr,id_prod,item_name,qty,unit_price,total,nopol,service,ukuran,vacuum,profit_pegawai,profit_management,variant_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"); mysqli_stmt_bind_param($stmt, 'issiiissssiis', $orderId,$id,$name,$qty,$price,$line,$nopol,$service,$ukuran,$vacuum,$staff,$management,$variantName); } else { $stmt = mysqli_prepare($conn, 'INSERT INTO order_items (id_tr,id_prod,item_name,item_price,quantity,total) VALUES (?,?,?,?,?,?)'); mysqli_stmt_bind_param($stmt, 'issiii', $orderId,$id,$name,$price,$qty,$line); } mysqli_stmt_execute($stmt); }
+    foreach ($items as $item) { $id = (string)($item['id'] ?? ''); $name = (string)($item['name'] ?? ''); $qty = max(1, (int)($item['qty'] ?? 1)); $type = (string)($item['cartType'] ?? 'product'); $price = in_array($type, ['carwash','detailing'], true) ? money($item['finalPrice'] ?? $item['unitPrice'] ?? 0) : money($item['unitPrice'] ?? 0); $line=$price*$qty; if (in_array($type, ['carwash','detailing'], true)) { $serviceTable = $type === 'detailing' ? 'order_detailing' : 'order_carwash'; $nopol=trim((string)($item['nopol'] ?? '')); $service=trim((string)($item['service'] ?? '')); $ukuran=trim((string)($item['ukuran'] ?? '')); $vacuum=strtolower((string)($item['vacuum'] ?? 'no')) === 'yes' ? 'yes' : 'no'; $variantName=trim((string)($item['variantName'] ?? '')); $staff=(int)round($line*.3); $management=$line-$staff; $stmt = mysqli_prepare($conn, "INSERT INTO `$serviceTable` (id_tr,id_prod,item_name,qty,unit_price,total,nopol,service,ukuran,vacuum,profit_pegawai,profit_management,variant_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"); mysqli_stmt_bind_param($stmt, 'issiiissssiis', $orderId,$id,$name,$qty,$price,$line,$nopol,$service,$ukuran,$vacuum,$staff,$management,$variantName); } else { $stmt = mysqli_prepare($conn, 'INSERT INTO order_items (id_tr,id_prod,item_name,item_price,quantity,total,order_type) VALUES (?,?,?,?,?,?,?)'); $orderType=$item['orderType'] ?? null; mysqli_stmt_bind_param($stmt, 'issiiis', $orderId,$id,$name,$price,$qty,$line,$orderType); } mysqli_stmt_execute($stmt); }
     $stmt = mysqli_prepare($conn, 'INSERT INTO mobile_sync_orders (client_order_id,order_id,user_id,created_at) VALUES (?,?,?,NOW())'); mysqli_stmt_bind_param($stmt, 'sii', $clientId,$orderId,$account['id_user']); mysqli_stmt_execute($stmt); mysqli_commit($conn); reply(['order_id'=>$orderId,'total'=>$total]);
   } catch (Throwable $e) { mysqli_rollback($conn); reply(['message' => 'Gagal menyimpan transaksi'], 500); }
 }
@@ -91,10 +98,10 @@ if ($path === 'report-history' && $_SERVER['REQUEST_METHOD'] === 'GET') {
       $id = (int)$row['id'];
       $orders[$id] = ['id'=>'server-'.$id, 'serverOrderId'=>$id, 'clientOrderId'=>$row['client_order_id'], 'table'=>$row['table_number'], 'method'=>$row['payment_method'], 'total'=>(int)$row['total_amount'], 'paid'=>(int)$row['paid_amount'], 'createdAt'=>str_replace(' ', 'T', $row['created_at']).'+07:00', 'items'=>[], 'synced'=>true];
     }
-    $r = mysqli_query($conn, "SELECT id_tr,id_prod,item_name,item_price price,quantity qty,total,'product' cart_type FROM order_items UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'carwash' FROM order_carwash");
+    $r = mysqli_query($conn, "SELECT id_tr,id_prod,item_name,item_price price,quantity qty,total,'product' cart_type,order_type FROM order_items UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'carwash',NULL FROM order_carwash UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'detailing',NULL FROM order_detailing");
     while ($row = mysqli_fetch_assoc($r)) {
       $id = (int)$row['id_tr'];
-      if (isset($orders[$id])) $orders[$id]['items'][] = ['id'=>(string)$row['id_prod'], 'name'=>$row['item_name'], 'price'=>(int)$row['price'], 'qty'=>(int)$row['qty'], 'lineTotal'=>(int)$row['total'], 'cartType'=>$row['cart_type']];
+      if (isset($orders[$id])) $orders[$id]['items'][] = ['id'=>(string)$row['id_prod'], 'name'=>$row['item_name'], 'price'=>(int)$row['price'], 'qty'=>(int)$row['qty'], 'lineTotal'=>(int)$row['total'], 'cartType'=>$row['cart_type'], 'orderType'=>$row['order_type']];
     }
     $expenses = [];
     $r = mysqli_query($conn, 'SELECT DATE(created_at) date,COALESCE(SUM(total),0) total FROM pengeluaran GROUP BY DATE(created_at)');

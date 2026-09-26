@@ -97,8 +97,16 @@ function persist() {
     localStorage.setItem("dejati-session", JSON.stringify(state.session));
   else localStorage.removeItem("dejati-session");
 }
+function amount(value) {
+  return Number(value || 0).toLocaleString("id-ID");
+}
 function money(value) {
-  return `Rp ${Number(value || 0).toLocaleString("id-ID")}`;
+  return `Rp ${amount(value)}`;
+}
+function orderTypeLabel(value) {
+  if (value === "dine-in") return "Dine In";
+  if (value === "take-away") return "Take Away";
+  return "";
 }
 function formatDigits(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -181,6 +189,7 @@ function receiptText(order) {
   const items = order.items.flatMap((item) => [
     `${item.qty}x ${String(item.name).slice(0, 28)}`,
     receiptLine("", money(item.price * item.qty)),
+    ...(orderTypeLabel(item.orderType) ? [`  ${orderTypeLabel(item.orderType)}`] : []),
     ...(item.notes ? [`  ${String(item.notes).slice(0, 29)}`] : []),
   ]);
   return [
@@ -198,6 +207,7 @@ function kitchenReceiptText(order) {
   const date = orderDate(order).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" });
   const items = order.items.flatMap((item) => [
     `${item.qty}x ${String(item.name).slice(0, 28)}`,
+    ...(orderTypeLabel(item.orderType) ? [`  ${orderTypeLabel(item.orderType)}`] : []),
     ...(item.notes ? [`  ${String(item.notes).slice(0, 29)}`] : []),
   ]);
   return [
@@ -297,6 +307,7 @@ function reportingOrders() {
 function cloneOrderItems(items = []) {
   return items.map((item) => ({
     ...item,
+    orderType: item.orderType ?? item.order_type ?? null,
     price: Number(item.price || item.unitPrice || item.finalPrice || 0),
     qty: Number(item.qty || item.quantity || 1),
     lineTotal: Number(item.lineTotal ?? Number(item.price || item.unitPrice || item.finalPrice || 0) * Number(item.qty || item.quantity || 1)),
@@ -557,6 +568,26 @@ function productImage(product) {
     return product.image;
   return `${API.replace(/\/api\/mobile$/, "")}/${product.image.replace(/^\//, "")}`;
 }
+function productCardTitle(name) {
+  const full = String(name || "").trim();
+  const characters = Array.from(full);
+  const text = characters.length > 24
+    ? `${characters.slice(0, 24).join("").trimEnd()}...`
+    : full;
+  const size = characters.length > 20
+    ? "compact"
+    : characters.length > 14
+      ? "small"
+      : characters.length > 9 ? "medium" : "default";
+  return { full, text, size };
+}
+function categoryLabelSize(label) {
+  const length = Array.from(String(label || "").trim()).length;
+  if (length > 20) return "tiny";
+  if (length > 14) return "compact";
+  if (length > 9) return "medium";
+  return "default";
+}
 
 function loginView() {
   return `<div class="hold-transition login-page bg login-reference"><div class="login-box"><div class="card login-card"><div class="card-body login-card-body"><div class="login-logo text-center"><img src="/server-assets/img/logo-dejati-black.PNG" alt="De'Jati"><p class="login-title">Login Kasir</p><p class="login-subtitle">De'Jati Coffee Garden &amp; Carwash</p></div><form id="login-form"><input class="form-control mb-3" name="username" placeholder="Username" required autofocus><input class="form-control mb-4" name="password" type="password" placeholder="Password" required><button class="btn btn-primary btn-block btn-login">Log In</button></form></div></div></div></div>`;
@@ -602,16 +633,16 @@ function filteredProducts() {
 }
 function productListView(products = filteredProducts()) {
   return products
-    .map(
-      (product) =>
-        `<div class="col-md-2 col-4 mb-2 px-1 product-column" data-category="${esc(product.category)}" data-name="${esc(product.name.toLowerCase())}"><button class="card product-card shadow-sm p-1" data-product="${esc(product.id)}">${productImage(product) ? `<img class="card-img-top p-1 mx-auto d-block" src="${esc(productImage(product))}" alt="${esc(product.name)}" width="100" height="100">` : `<div class="product-no-img card-img-top p-1">${esc(
+    .map((product) => {
+      const title = productCardTitle(product.name);
+      return `<div class="col-md-2 col-4 mb-2 px-1 product-column" data-category="${esc(product.category)}" data-name="${esc(product.name.toLowerCase())}"><button class="card product-card shadow-sm p-1" data-product="${esc(product.id)}" data-product-type="${esc(product.cartType || "product")}">${productImage(product) ? `<img class="card-img-top p-1 mx-auto d-block" src="${esc(productImage(product))}" alt="${esc(product.name)}" width="100" height="100">` : `<div class="product-no-img card-img-top p-1">${esc(
           product.name
             .split(/\s+/)
             .map((word) => word[0])
             .join("")
             .slice(0, 3),
-        )}</div>`}<div class="card-body text-center p-2"><h6 class="product-title mb-1 text-left">${esc(product.name)}</h6><p class="product-price mb-0 text-right text-muted">${money(variants(product)[0]?.price || product.price)}</p></div></button></div>`,
-    )
+        )}</div>`}<div class="card-body text-center p-2"><h6 class="product-title product-title-${title.size} mb-1 text-left" title="${esc(title.full)}">${esc(title.text)}</h6><p class="product-price mb-0 text-right text-muted">${money(variants(product)[0]?.price || product.price)}</p></div></button></div>`;
+    })
     .join("") || `<p class="text-muted p-3">${state.products.length ? "Produk tidak ditemukan." : "Katalog belum tersedia. Sinkronisasi database akan berjalan saat halaman dimuat."}</p>`;
 }
 function updateProductList() {
@@ -703,11 +734,11 @@ function transactionView() {
   const cancelDisabled = !isHistoryOrder || selectedStatus === "CANCEL";
   const cancelAction = orderActionButton("cancel-transaction", "fa-ban", "Cancel Transaksi", "danger", "sm", cancelDisabled);
   const orderActions = `<div class="order-primary-actions">${orderActionButton("pay", "fa-money-bill-wave", "Pay Now", "success", "lg", !editable)}${orderActionButton("bill", "fa-file-alt", "Open Bill", "info", "lg", !editable)}</div><div class="order-action-grid">${orderActionButton("print-chit", "fa-receipt", "Print Chit", "secondary")}${orderActionButton("print-invoice-cashier", "fa-file-invoice", "Print Invoice", "primary")}${cancelAction}</div>`;
-  return `<section class="content transaction-screen pt-3"><div class="container-fluid p-0"><div class="row transaction-row"><div class="col-lg-4"><div class="position-sticky order-panel"><div class="card d-flex flex-column order-card"><div class="card-header bg-primary text-white order-summary-header"><h5 class="mb-0 order-summary-title">Order Summary${activeBillBadge}</h5><div class="order-header-actions"><button type="button" class="btn btn-sm btn-danger order-header-btn" data-action="clear"><i class="fas fa-trash"></i><small>Clear</small></button><button type="button" class="btn btn-sm btn-light order-history-toggle" data-action="toggle-history"><i class="fas fa-history"></i><small>History</small></button></div></div><div class="card-body d-flex flex-column p-2"><div class="table-responsive flex-grow-1 order-items-scroll"><table class="table table-sm mb-3 text-center" id="order-table"><thead class="bg-light"><tr><th>Item</th><th style="width:90px">Price</th><th style="width:60px">Qty</th><th style="width:90px">Total</th></tr></thead><tbody>${state.cart.length ? state.cart.map((item, index) => `<tr class="cart-row" ${summaryItemsEditable ? `data-edit="${index}"` : ""}><td class="text-left ${item.hold ? "text-danger" : ""}">${esc(item.name)}${item.notes ? `<small class="d-block text-muted">**${esc(item.notes)}</small>` : ""}</td><td>${money(item.price)}</td><td>${item.qty}</td><td>${money(item.price * item.qty)}</td></tr>`).join("") : ""}</tbody></table></div><div class="order-summary-footer border-top pt-2"><h5 class="order-total-label">Total: <span id="total-amount">${money(total())}</span></h5>${orderActions}</div></div></div></div></div><div class="col-lg-8 transaction-products-panel"><div class="product-filter-bar"><input id="product-search" class="form-control mb-2" value="${esc(state.search)}" placeholder="Search product..."><ul class="nav nav-pills d-flex justify-content-start nav-pills-custom border rounded p-1 mb-2" id="categoryTabs" role="tablist">${categories()
-    .map(
-      (category) =>
-        `<li class="nav-item mr-1" role="presentation"><button class="order-cat nav-link btn btn-outline btn-sm p-1 flex-column align-items-center ${category.id === state.category ? "active" : ""}" data-category="${esc(category.id)}"><span class="material-symbols-outlined">${esc(category.icon)}</span><span class="text-dark text-bold d-block">${esc(category.label)}</span></button></li>`,
-    )
+  return `<section class="content transaction-screen pt-3"><div class="container-fluid p-0"><div class="row transaction-row"><div class="col-lg-4"><div class="position-sticky order-panel"><div class="card d-flex flex-column order-card"><div class="card-header bg-primary text-white order-summary-header"><h5 class="mb-0 order-summary-title">Order Summary${activeBillBadge}</h5><div class="order-header-actions"><button type="button" class="btn btn-sm btn-danger order-header-btn" data-action="clear"><i class="fas fa-trash"></i><small>Clear</small></button><button type="button" class="btn btn-sm btn-light order-history-toggle" data-action="toggle-history"><i class="fas fa-history"></i><small>History</small></button></div></div><div class="card-body d-flex flex-column p-2"><div class="table-responsive flex-grow-1 order-items-scroll"><table class="table table-sm mb-3 text-center" id="order-table"><thead class="bg-light"><tr><th>Item</th><th style="width:90px">Price</th><th style="width:60px">Qty</th><th style="width:90px">Total</th></tr></thead><tbody>${state.cart.length ? state.cart.map((item, index) => `<tr class="cart-row" ${summaryItemsEditable ? `data-edit="${index}"` : ""}><td class="text-left ${item.hold ? "text-danger" : ""}">${esc(item.name)}${orderTypeLabel(item.orderType) ? `<small class="d-block text-info">${orderTypeLabel(item.orderType)}</small>` : ""}${item.notes ? `<small class="d-block text-muted">**${esc(item.notes)}</small>` : ""}</td><td>${amount(item.price)}</td><td>${item.qty}</td><td>${amount(item.price * item.qty)}</td></tr>`).join("") : ""}</tbody></table></div><div class="order-summary-footer border-top pt-2"><h5 class="order-total-label">Total: <span id="total-amount">${money(total())}</span></h5>${orderActions}</div></div></div></div></div><div class="col-lg-8 transaction-products-panel"><div class="product-filter-bar"><input id="product-search" class="form-control mb-2" value="${esc(state.search)}" placeholder="Search product..."><ul class="nav nav-pills d-flex justify-content-start nav-pills-custom border rounded p-1 mb-2" id="categoryTabs" role="tablist">${categories()
+    .map((category) => {
+      const labelSize = categoryLabelSize(category.label);
+      return `<li class="nav-item mr-1" role="presentation"><button class="order-cat nav-link btn btn-outline btn-sm p-1 ${category.id === state.category ? "active" : ""}" data-category="${esc(category.id)}" title="${esc(category.label)}"><span class="category-icon material-symbols-outlined">${esc(category.icon)}</span><span class="category-label category-label-${labelSize} text-dark text-bold">${esc(category.label)}</span></button></li>`;
+    })
     .join(
       "",
     )}</ul></div><div class="card shadow-sm product-grid-card"><div class="card-body"><div class="row justify-content-left" id="product-list">${productListView()}</div></div></div></div></div></div>${historyDrawerView(historyOrders)}</section>`;
@@ -846,8 +877,12 @@ function decorateReferenceModal() {
     if (title) title.id = "openBillModalLabel";
   }
 }
-function openProduct(id) {
-  const product = state.products.find((item) => String(item.id) === String(id));
+function openProduct(id, cartType = "product") {
+  const product = state.products.find(
+    (item) =>
+      String(item.id) === String(id) &&
+      String(item.cartType || "product") === String(cartType),
+  );
   if (!product) return;
   state.selected = product;
   state.editing = null;
@@ -1062,7 +1097,7 @@ app.addEventListener("click", async (event) => {
       notice("History transaksi paid hanya bisa dilihat.", "warning");
       return;
     }
-    return openProduct(target.dataset.product);
+    return openProduct(target.dataset.product, target.dataset.productType);
   }
   if (target.dataset.category) {
     state.category = target.dataset.category;

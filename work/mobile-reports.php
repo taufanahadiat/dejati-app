@@ -59,10 +59,10 @@ function reportHistory(mysqli $conn): array {
             'cancelReason'=>$row['cancel_reason'],'canceledAt'=>$row['canceled_at'],
             'createdAt'=>str_replace(' ','T',$row['created_at']).'+07:00','items'=>[],'synced'=>true];
     }
-    $r = $conn->query("SELECT id_tr,id_prod,item_name,item_price price,quantity qty,total,'product' cart_type,'' nopol,'' service,'' ukuran,'no' vacuum,'' variant_name FROM order_items UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'carwash',nopol,service,ukuran,vacuum,COALESCE(variant_name,'') FROM order_carwash UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'detailing',nopol,service,ukuran,vacuum,COALESCE(variant_name,'') FROM order_detailing");
+    $r = $conn->query("SELECT id_tr,id_prod,item_name,item_price price,quantity qty,total,'product' cart_type,'' nopol,'' service,'' ukuran,'no' vacuum,'' variant_name,order_type FROM order_items UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'carwash',nopol,service,ukuran,vacuum,COALESCE(variant_name,''),NULL FROM order_carwash UNION ALL SELECT id_tr,id_prod,item_name,unit_price,qty,total,'detailing',nopol,service,ukuran,vacuum,COALESCE(variant_name,''),NULL FROM order_detailing");
     while ($row = $r->fetch_assoc()) {
         $id = (int)$row['id_tr'];
-        if (isset($orders[$id])) $orders[$id]['items'][] = ['id'=>(string)$row['id_prod'],'name'=>$row['item_name'],'price'=>(int)$row['price'],'qty'=>(int)$row['qty'],'lineTotal'=>(int)$row['total'],'cartType'=>$row['cart_type'],'nopol'=>$row['nopol'],'service'=>$row['service'],'ukuran'=>$row['ukuran'],'vacuum'=>$row['vacuum'],'variantName'=>$row['variant_name']];
+        if (isset($orders[$id])) $orders[$id]['items'][] = ['id'=>(string)$row['id_prod'],'name'=>$row['item_name'],'price'=>(int)$row['price'],'qty'=>(int)$row['qty'],'lineTotal'=>(int)$row['total'],'cartType'=>$row['cart_type'],'nopol'=>$row['nopol'],'service'=>$row['service'],'ukuran'=>$row['ukuran'],'vacuum'=>$row['vacuum'],'variantName'=>$row['variant_name'],'orderType'=>$row['order_type']];
     }
     foreach ($orders as &$order) {
         $order['subtotal'] = array_sum(array_column($order['items'],'lineTotal'));
