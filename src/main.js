@@ -1,6 +1,7 @@
 import { createReports } from "./reports.js";
 import { orderStatus } from "./reportModel.js";
 import { mergeReportOrders } from "./reportOrders.js";
+import { reconcileLocalOrders, sameOrderIdentity, syncableStatus } from "./orderSync.js";
 import {
   initializeServerMirror,
   loadServerCatalog,
@@ -313,19 +314,23 @@ function cloneOrderItems(items = []) {
     lineTotal: Number(item.lineTotal ?? Number(item.price || item.unitPrice || item.finalPrice || 0) * Number(item.qty || item.quantity || 1)),
   }));
 }
-function sameOrderIdentity(order, ref) {
-  if (!order || !ref) return false;
-  return (
-    order.id === ref.id ||
-    order.id === ref.clientOrderId ||
-    order.clientOrderId === ref.id ||
-    order.clientOrderId === ref.clientOrderId ||
-    (order.serverOrderId && String(order.serverOrderId) === String(ref.serverOrderId)) ||
-    (ref.serverOrderId && String(order.id) === String(ref.serverOrderId))
-  );
-}
 function findLocalOrder(ref) {
   return state.orders.find((order) => sameOrderIdentity(order, ref));
+}
+function reconcileServerHistory(history) {
+  const result = reconcileLocalOrders(state.orders, history?.orders, orderStatus);
+  if (state.activeBill) {
+    const local = findLocalOrder(state.activeBill);
+    const server = history?.orders?.find((order) => sameOrderIdentity(order, state.activeBill));
+    const canonical = server || local;
+    if (canonical && orderStatus(canonical) !== "OPEN BILL") {
+      state.activeBill = null;
+      state.cart = [];
+      result.changed = true;
+    }
+  }
+  if (result.changed) persist();
+  return result;
 }
 function loadOpenBillForCheckout(order) {
   if (orderStatus(order) !== "OPEN BILL") return false;
@@ -915,6 +920,7 @@ function addOrUpdate(line) {
 }
 async function saveOrder(data, openBill = false) {
   if (!state.cart.length) return notice("Keranjang masih kosong.", "warning");
+  if (state.syncing) throw new Error("Sinkronisasi transaksi sedang berjalan. Tunggu sebentar lalu coba lagi.");
   if (state.activeBill?.viewOnly) return notice("History transaksi paid hanya bisa dilihat.", "warning");
   state.table = data.table.trim();
   const discountPercent = Math.min(
@@ -933,6 +939,13 @@ async function saveOrder(data, openBill = false) {
   const activeBill = state.activeBill;
   const localOpenBill = activeBill ? findLocalOrder(activeBill) : null;
   const existingOpenBill = localOpenBill || (activeBill ? reportingOrders().find((order) => sameOrderIdentity(order, activeBill)) : null);
+  if (existingOpenBill && orderStatus(existingOpenBill) !== "OPEN BILL") {
+    state.cart = [];
+    state.activeBill = null;
+    persist();
+    render();
+    throw new Error("Transaksi ini sudah selesai di server. Order Summary telah dibersihkan; buat transaksi baru.");
+  }
   const order = existingOpenBill
     ? {
       ...existingOpenBill,
@@ -972,8 +985,12 @@ async function saveOrder(data, openBill = false) {
       method: "POST",
       body: JSON.stringify({
         id: existingOpenBill.serverOrderId,
+        client_order_id: existingOpenBill.clientOrderId || existingOpenBill.id,
+        table_number: order.table,
         method: data.method,
         paid,
+        settled_at: order.settledAt,
+        items: order.items.map((item) => ({ ...item, unitPrice: item.price, finalPrice: item.price })),
       }),
     });
   }
@@ -995,17 +1012,18 @@ async function saveOrder(data, openBill = false) {
   );
   if (!openBill) {
     setTimeout(() => void printCompletedOrder(order), 0);
-    void sync(true);
   }
+  void sync(true, true);
 }
 async function sync(silent = false, force = false) {
   if (!state.session?.token || state.syncing || (silent && state.modal && !force)) return;
   state.syncing = true;
   render();
   try {
-    const [catalog, serverReport] = await Promise.all([
+    const [catalog, serverReport, initialHistory] = await Promise.all([
       api("catalog", state.session.token),
       api("daily-report", state.session.token),
+      api("report-history", state.session.token),
     ]);
     if (Array.isArray(catalog.products)) state.products = catalog.products;
     if (Array.isArray(catalog.categories)) {
@@ -1019,17 +1037,22 @@ async function sync(silent = false, force = false) {
       serverReport,
       catalog.categories || [],
     );
+    if (!Array.isArray(initialHistory.orders)) throw new Error("Data report server tidak valid.");
+    state.serverHistory = initialHistory;
+    reconcileServerHistory(initialHistory);
     let uploadError = null;
-    for (const order of state.orders.filter((item) => !item.synced && orderStatus(item) === "PAID")) {
+    for (const order of state.orders.filter((item) => !item.synced && syncableStatus(orderStatus(item)))) {
       try {
+      const status = orderStatus(order);
+      const clientOrderId = order.clientOrderId || order.id;
       const saved = await api("orders", state.session.token, {
         method: "POST",
         body: JSON.stringify({
-          client_order_id: order.id,
+          client_order_id: clientOrderId,
           created_at: order.createdAt,
           table_number: order.table,
           payment_method: order.method,
-          status: order.method === "Open Bill" ? "open_bill" : "paid",
+          status: status === "OPEN BILL" ? "open_bill" : status === "CANCEL" ? "cancel" : "paid",
           subtotal: order.subtotal,
           discount: order.discount,
           discountPercent: order.discountPercent,
@@ -1043,16 +1066,19 @@ async function sync(silent = false, force = false) {
           })),
         }),
       });
+      if (saved.client_order_id !== clientOrderId || String(saved.table_number) !== String(order.table) || Number(saved.total) !== Number(order.total) || String(saved.status).toUpperCase().replaceAll("_", " ") !== status)
+        throw new Error("Server mengembalikan identitas transaksi yang berbeda. Sinkronisasi dihentikan.");
       await mirrorServerTransaction(order, saved.order_id);
       order.synced = true;
       order.serverOrderId = saved.order_id;
       persist();
       } catch (error) { uploadError = error; break; }
     }
-    if (!uploadError && !state.orders.some(item => !item.synced && orderStatus(item) === "PAID")) await reports.syncClosings();
+    if (!uploadError && !state.orders.some(item => !item.synced && syncableStatus(orderStatus(item)))) await reports.syncClosings();
     const history = await api("report-history", state.session.token);
     if (!Array.isArray(history.orders)) throw new Error("Data report server tidak valid.");
     state.serverHistory = history;
+    reconcileServerHistory(history);
     persist();
     await mirrorReportHistory(history);
     if (uploadError) throw uploadError;
